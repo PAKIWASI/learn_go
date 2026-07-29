@@ -449,6 +449,7 @@ func (g *GoL) handleInput(k byte, keyCh <-chan byte) {
 }
 
 func (g *GoL) welcomeLoop(keyCh <-chan byte) {
+
 welcomeLoop:
 	for {
 		select {
@@ -472,6 +473,7 @@ welcomeLoop:
 }
 
 func Run() {
+
 	g := GoL{}
 	g.init()
 	defer g.cleanupTerm()
@@ -497,10 +499,14 @@ func Run() {
 		}
 	}()
 
+	g.drawBorder()
+	g.buffer.Flush()
+
 	// welcome screen: draw ONCE, then block for specifically d/r/q
 	// they're handled directly rather than routed through handleInput
 	g.drawWelcome()
 	g.welcomeLoop(keyCh)
+
 
 	select {
 	case <-g.done:
@@ -508,8 +514,6 @@ func Run() {
 	default:
 	}
 
-	g.drawBorder()
-	g.buffer.Flush()
 
 	// FPS stuff
 	const fps = 10
@@ -537,5 +541,7 @@ func Run() {
 			return
 		}
 	}
-
 }
+
+
+
