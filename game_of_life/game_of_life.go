@@ -247,35 +247,35 @@ func bigText(s string) []string {
 	return lines
 }
 
-// writeCentered writes s centered horizontally at terminal row (1-indexed)
+// writes s centered horizontally at terminal row (1-indexed)
 func (g *GoL) writeCentered(row int, color, s string) {
 	col := max((g.width-len([]rune(s)))/2, 0)
 	fmt.Fprintf(g.buffer, "\x1b[%d;%dH%s%s", row, col+1, color, s)
 }
 
+
+// shows the title and the three welcome-screen actions
+// d = draw your own pattern, r = start with a random pattern, q = quit
 func (g *GoL) drawWelcome() {
 	fmt.Fprint(g.buffer, "\x1b[2J") // clear screen (Dracula bg from setupTerm still active)
- 
+
 	title := bigText("GAME OF LIFE")
 	startRow := g.height/2 - len(title)/2 - 3 // room for controls below
- 
+
 	for i, line := range title {
 		g.writeCentered(startRow+i, fgPurple, line)
 	}
-	g.writeCentered(startRow+len(title)+2, fgComment, "p pause    r restart    q quit")
-	g.writeCentered(startRow+len(title)+4, fgGreen, "press any key to draw your pattern")
- 
+	g.writeCentered(startRow+len(title)+2, fgComment, "d draw    r random    q quit")
+
 	g.buffer.Flush()
 }
 
-// drawPaused overlays a message over the current grid, without clearing it,
-// so the last generation stays visible underneath. Uses the current-line
-// highlight color as a background bar so the message reads clearly against
-// whatever cells happen to be behind it
+// overlays a message over the current grid, without clearing it
 func (g *GoL) drawPaused() {
-	msg := " PAUSED — p resume   r restart   q quit "
+	msg := " PAUSED — p resume   c clear   d draw   r random   q quit "
 	col := max((g.width-len([]rune(msg)))/2, 0)
 	row := g.height / 2
+	// theme
 	fmt.Fprintf(g.buffer, "\x1b[%d;%dH%s%s%s%s", row, col+1, bgLine, fgPink, msg, bgBase)
 	g.buffer.Flush()
 }
@@ -293,6 +293,7 @@ func (g *GoL) stampPattern(pattern []string, row, col int) {
 	}
 }
 
+// TODO: rotate?
 var patternGlider = []string{
 	".o.",
 	"..o",
@@ -300,8 +301,9 @@ var patternGlider = []string{
 }
 
 // renders the drawing buffer with the cursor cell highlighted
-// using the current-line background, so you can see where you'll toggle.
-func (g *GoL) drawEditor() {
+// hint is the bottom-row instruction text lets callers say "enter start"
+// on first entry or "enter resume" when re-opened from the pause menu
+func (g *GoL) drawEditor(hint string) {
 	fmt.Fprint(g.buffer, "\x1b[1;1H")
 	fmt.Fprint(g.buffer, fgGreen)
 
@@ -322,15 +324,15 @@ func (g *GoL) drawEditor() {
 		}
 	}
 
-	g.writeCentered(g.height, fgComment, "hjkl move  space toggle  g glider  r random  enter start")
+	g.writeCentered(g.height, fgComment, hint)
 	g.buffer.Flush()
 }
 
-// runEditor blocks, letting the user draw a starting pattern with hjkl +
-// space, until they press enter (start the simulation) or quit.
-func (g *GoL) runEditor(keyCh <-chan byte) {
+// draw a starting pattern with hjkl + space, until they press enter (start/resume) or quit
+// hint is passed straight through to drawEditor now
+func (g *GoL) runEditor(keyCh <-chan byte, hint string) {
 	g.cursorRow, g.cursorCol = g.height/2, g.width/2
-	g.drawEditor()
+	g.drawEditor(hint)
 
 	for {
 		select {
@@ -359,12 +361,12 @@ func (g *GoL) runEditor(keyCh <-chan byte) {
 			case 'r':
 				g.initRandom()
 			case '\r', '\n':
-				return // enter: done drawing, go start the simulation
+				return // enter: done drawing, go start/resume the simulation
 			case 'q', 3:
 				g.shutdown()
 				return
 			}
-			g.drawEditor()
+			g.drawEditor(hint)
 		case <-g.done:
 			return
 		}
@@ -372,10 +374,13 @@ func (g *GoL) runEditor(keyCh <-chan byte) {
 }
 
 
-func (g *GoL) handleInput(k byte) {
+// handles keys during actual gameplay (both running and
+// paused). keyCh is only needed for the 'd' (draw again) pause action
+// which re-enters the blocking editor loop
+func (g *GoL) handleInput(k byte, keyCh <-chan byte) {
 	switch k {
 	case 'q', 3: //3 = Ctrl+C is disabled in raw mode. it arrives as
-		// this raw byte over stdin instead, and must be handled like any other key.
+		// this raw byte over stdin instead, and must be handled like any other key
 		g.shutdown()
 	case 'p':
 		g.isPaused = !g.isPaused
@@ -384,6 +389,46 @@ func (g *GoL) handleInput(k byte) {
 		}
 	case 'r':
 		g.initRandom()
+		if g.isPaused {
+			// ticker doesnot call draw() while paused, so repaint by hand
+			g.draw()
+			g.drawPaused()
+		}
+	case 'c':
+		if g.isPaused { // clear only makes sense as a pause-menu action
+			g.clearGrid()
+			g.draw()
+			g.drawPaused()
+		}
+	case 'd':
+		if g.isPaused { // draw-again only makes sense as a pause-menu action
+			g.runEditor(keyCh, "hjkl move  space toggle  g glider  r random  enter resume")
+			g.draw()
+			g.drawPaused()
+		}
+	}
+}
+
+func (g *GoL) welcomeLoop(keyCh <-chan byte) {
+welcomeLoop:
+	for {
+		select {
+		case k := <-keyCh:
+			switch k {
+			case 'd':
+				g.runEditor(keyCh, "hjkl move  space toggle  g glider  r random  enter start")
+				break welcomeLoop
+			case 'r':
+				g.initRandom()
+				break welcomeLoop
+			case 'q', 3:
+				g.shutdown()
+				break welcomeLoop
+			}
+			// any other key: ignore, keep waiting on the welcome screen
+		case <-g.done:
+			return
+		}
 	}
 }
 
@@ -414,25 +459,14 @@ func Run() {
 		}
 	}()
 
-	// welcome screen: draw ONCE, then block until any key or a shutdown signal
-	// this must happen before the ticker starts, so frame timing begins fresh
-	// once the game actually starts, not from whenever the program launched
+	// welcome screen: draw ONCE, then block for specifically d/r/q
+	// they're handled directly rather than routed through handleInput
 	g.drawWelcome()
-	select {
-	case k := <-keyCh:
-		g.handleInput(k) // if this was 'q'/Ctrl+C, g.done is now closed
-		// the main loop below will catch it on its very first iteration
-	case <-g.done:
-		return
-	}
+	g.welcomeLoop(keyCh)
 
-
-	// editor: draw the starting pattern with hjkl + space. blocks until
-	// enter (start) or q/Ctrl+C (quit before ever playing).
-	g.runEditor(keyCh)
 	select {
 	case <-g.done:
-		return // runEditor already triggered shutdown — don't fall through to the game
+		return // 'q'/Ctrl+C during welcome or the editor. don't fall through
 	default:
 	}
 
@@ -451,7 +485,7 @@ func Run() {
 		select {
 		// if we have a keyboard input we handle it first, then go to main update/draw stuff
 		case k := <-keyCh:
-			g.handleInput(k)
+			g.handleInput(k, keyCh)
 		// channel receives a value every time sleep duration elapses. ranging over it blocks until the next tick
 		// so we naturally get proper frame pacing
 		case <-ticker.C:
