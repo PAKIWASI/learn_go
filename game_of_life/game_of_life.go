@@ -28,6 +28,15 @@ const (
 )
 
 const (
+	borderTL = '╭'
+	borderTR = '╮'
+	borderBL = '╰'
+	borderBR = '╯'
+	borderH  = '─'
+	borderV  = '│'
+)
+
+const (
 	dead  byte = ' '
 	alive byte = 'o'
 )
@@ -64,8 +73,9 @@ func (g *GoL) setTermDims() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	g.width = width
-	g.height = height
+	// reserve space for borders
+	g.width = width - 2
+	g.height = height - 2
 }
 
 // enter raw mode, hide cursor etc
@@ -96,8 +106,7 @@ func (g *GoL) shutdown() {
 	g.doneOnce.Do(func() { close(g.done) })
 }
 
-
-// clearGrid sets every cell dead 
+// sets every cell dead
 func (g *GoL) clearGrid() {
 	for i := range g.matrix1 {
 		for j := range g.matrix1[i] {
@@ -125,8 +134,6 @@ func (g *GoL) initRandom() {
 	}
 }
 
-
-
 func (g *GoL) init() {
 
 	g.done = make(chan struct{})
@@ -150,6 +157,8 @@ func (g *GoL) init() {
 
 	// setup term raw mode (cleanup defered in main())
 	g.setupTerm()
+	g.drawBorder()
+	g.buffer.Flush()
 }
 
 // flips a single cell
@@ -200,12 +209,14 @@ func (g *GoL) update() {
 }
 
 func (g *GoL) draw() {
-	fmt.Fprint(g.buffer, "\x1b[1;1H") // bring cursor home
-
 	// set green foreground ONCE for the whole frame
 	fmt.Fprint(g.buffer, fgGreen)
 
 	for i := range g.height {
+		// reposition to the start of this interior row every time
+		// the grid is inset by the border, so we can't just write
+		// one long stream of bytes from 1;1H or we'd wrap onto the border
+		fmt.Fprintf(g.buffer, "\x1b[%d;2H", i+2)
 		for j := range g.width {
 			if !g.matrix1[i][j] {
 				g.buffer.WriteByte(dead)
@@ -216,6 +227,35 @@ func (g *GoL) draw() {
 	}
 
 	g.buffer.Flush() // write to stdiot
+}
+
+// draws a rounded border around the full terminal once.
+// this must be re-called after any full-screen clear (\x1b[2J),
+func (g *GoL) drawBorder() {
+	fmt.Fprint(g.buffer, fgPurple)
+
+	// top edge
+	fmt.Fprintf(g.buffer, "\x1b[1;1H%c", borderTL)
+	for range g.width {
+		g.buffer.WriteRune(borderH)
+	}
+	g.buffer.WriteRune(borderTR)
+
+	// side edges
+	for i := 0; i < g.height; i++ {
+		row := i + 2 // +1 for top border, +1 for 1-indexing
+		fmt.Fprintf(g.buffer, "\x1b[%d;1H%c", row, borderV)
+		fmt.Fprintf(g.buffer, "\x1b[%d;%dH%c", row, g.width+2, borderV)
+	}
+
+	// bottom edge
+	fmt.Fprintf(g.buffer, "\x1b[%d;1H%c", g.height+2, borderBL)
+	for range g.width {
+		g.buffer.WriteRune(borderH)
+	}
+	g.buffer.WriteRune(borderBR)
+
+	fmt.Fprint(g.buffer, fgGreen) // restore grid's default fg for whatever follows
 }
 
 // claude be like:
@@ -253,11 +293,11 @@ func (g *GoL) writeCentered(row int, color, s string) {
 	fmt.Fprintf(g.buffer, "\x1b[%d;%dH%s%s", row, col+1, color, s)
 }
 
-
 // shows the title and the three welcome-screen actions
 // d = draw your own pattern, r = start with a random pattern, q = quit
 func (g *GoL) drawWelcome() {
 	fmt.Fprint(g.buffer, "\x1b[2J") // clear screen (Dracula bg from setupTerm still active)
+	g.drawBorder()
 
 	title := bigText("GAME OF LIFE")
 	startRow := g.height/2 - len(title)/2 - 3 // room for controls below
@@ -304,10 +344,10 @@ var patternGlider = []string{
 // hint is the bottom-row instruction text lets callers say "enter start"
 // on first entry or "enter resume" when re-opened from the pause menu
 func (g *GoL) drawEditor(hint string) {
-	fmt.Fprint(g.buffer, "\x1b[1;1H")
 	fmt.Fprint(g.buffer, fgGreen)
 
 	for i := range g.height {
+		fmt.Fprintf(g.buffer, "\x1b[%d;2H", i+2)
 		for j := range g.width {
 			atCursor := i == g.cursorRow && j == g.cursorCol
 			if atCursor {
@@ -324,7 +364,7 @@ func (g *GoL) drawEditor(hint string) {
 		}
 	}
 
-	g.writeCentered(g.height, fgComment, hint)
+	g.writeCentered(g.height+1, fgComment, hint)
 	g.buffer.Flush()
 }
 
@@ -372,7 +412,6 @@ func (g *GoL) runEditor(keyCh <-chan byte, hint string) {
 		}
 	}
 }
-
 
 // handles keys during actual gameplay (both running and
 // paused). keyCh is only needed for the 'd' (draw again) pause action
@@ -432,7 +471,6 @@ welcomeLoop:
 	}
 }
 
-
 func Run() {
 	g := GoL{}
 	g.init()
@@ -470,6 +508,8 @@ func Run() {
 	default:
 	}
 
+	g.drawBorder()
+	g.buffer.Flush()
 
 	// FPS stuff
 	const fps = 10
