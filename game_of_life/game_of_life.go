@@ -1,6 +1,5 @@
 package gameoflife
 
-
 import (
 	"bufio"
 	"fmt"
@@ -15,22 +14,21 @@ import (
 	"golang.org/x/term"
 )
 
-
 // Dracula palette as 24-bit ANSI SGR codes.
 const (
-	cReset   = "\x1b[0m"
-	bgBase   = "\x1b[48;2;40;42;54m"    // #282a36 background
-	bgLine   = "\x1b[48;2;68;71;90m"    // #44475a current-line (highlight bar)
-	fgFg     = "\x1b[38;2;248;248;242m" // #f8f8f2 foreground
-	fgComment = "\x1b[38;2;98;114;164m" // #6272a4 comment (dim text)
-	fgPurple = "\x1b[38;2;189;147;249m" // #bd93f9
-	fgPink   = "\x1b[38;2;255;121;198m" // #ff79c6
-	fgGreen  = "\x1b[38;2;80;250;123m"  // #50fa7b
-	fgCyan   = "\x1b[38;2;139;233;253m" // #8be9fd
+	cReset    = "\x1b[0m"
+	bgBase    = "\x1b[48;2;40;42;54m"    // #282a36 background
+	bgLine    = "\x1b[48;2;68;71;90m"    // #44475a current-line (highlight bar)
+	fgFg      = "\x1b[38;2;248;248;242m" // #f8f8f2 foreground
+	fgComment = "\x1b[38;2;98;114;164m"  // #6272a4 comment (dim text)
+	fgPurple  = "\x1b[38;2;189;147;249m" // #bd93f9
+	fgPink    = "\x1b[38;2;255;121;198m" // #ff79c6
+	fgGreen   = "\x1b[38;2;80;250;123m"  // #50fa7b
+	fgCyan    = "\x1b[38;2;139;233;253m" // #8be9fd
 )
 
 const (
-	dead byte = ' '
+	dead  byte = ' '
 	alive byte = 'o'
 )
 
@@ -48,15 +46,17 @@ type GoL struct {
 	buffer *bufio.Writer
 	// saved terminal state to restore later
 	oldState *term.State
-	
+
+	// editor cursor position, used only while drawing the starting pattern
+	cursorRow int
+	cursorCol int
+
 	isPaused bool
 	//signal game is finished
 	done     chan struct{}
 	doneOnce sync.Once //guarantees g.done is closed exactly once
 	// even if 'q' and Ctrl+C/SIGTERM race each other
 }
-
-
 
 // get width, height of user's actual terminal
 func (g *GoL) setTermDims() {
@@ -85,7 +85,7 @@ func (g *GoL) setupTerm() {
 // exit raw mode, show curser etc
 func (g *GoL) cleanupTerm() {
 	term.Restore(int(os.Stdin.Fd()), g.oldState)
-	fmt.Fprint(g.buffer, cReset)       // drop the Dracula bg/fg back to terminal defaults
+	fmt.Fprint(g.buffer, cReset)      // drop the Dracula bg/fg back to terminal defaults
 	fmt.Fprint(g.buffer, "\x1b[?25h") // show
 	g.buffer.Flush()
 }
@@ -96,8 +96,15 @@ func (g *GoL) shutdown() {
 	g.doneOnce.Do(func() { close(g.done) })
 }
 
-// init the grid with some random alive cells
+// init the grid with some random cells alive
 func (g *GoL) initRandom() {
+	// cleanup
+	for i := range g.matrix1 {
+		for j := range g.matrix1[i] {
+			g.matrix1[i][j] = false
+		}
+	}
+
 	// switch on 30% of the cells
 	toCreate := int32(float32(g.width) * float32(g.height) * 0.3)
 
@@ -111,17 +118,6 @@ func (g *GoL) initRandom() {
 			break
 		}
 	}
-}
-
-// Clears both matrices and reseeds a fresh random pattern
-func (g *GoL) restart() {
-	for i := range g.matrix1 {
-		for j := range g.matrix1[i] {
-			g.matrix1[i][j] = false
-			g.matrix2[i][j] = false
-		}
-	}
-	g.initRandom()
 }
 
 func (g *GoL) init() {
@@ -147,9 +143,11 @@ func (g *GoL) init() {
 
 	// setup term raw mode (cleanup defered in main())
 	g.setupTerm()
+}
 
-	// init some cells
-	g.initRandom()
+// flips a single cell
+func (g *GoL) toggleCell(i, j int) {
+	g.matrix1[i][j] = !g.matrix1[i][j]
 }
 
 // given a cell (i, j) count how many of its neighbours are alive
@@ -195,11 +193,11 @@ func (g *GoL) update() {
 }
 
 func (g *GoL) draw() {
-	fmt.Fprint(g.buffer, "\x1b[1;1H")	// bring cursor home
- 
+	fmt.Fprint(g.buffer, "\x1b[1;1H") // bring cursor home
+
 	// set green foreground ONCE for the whole frame
 	fmt.Fprint(g.buffer, fgGreen)
- 
+
 	for i := range g.height {
 		for j := range g.width {
 			if !g.matrix1[i][j] {
@@ -209,8 +207,8 @@ func (g *GoL) draw() {
 			}
 		}
 	}
- 
-	g.buffer.Flush()	// write to stdiot
+
+	g.buffer.Flush() // write to stdiot
 }
 
 // claude be like:
@@ -247,7 +245,7 @@ func (g *GoL) writeCentered(row int, color, s string) {
 	col := max((g.width-len([]rune(s)))/2, 0)
 	fmt.Fprintf(g.buffer, "\x1b[%d;%dH%s%s", row, col+1, color, s)
 }
- 
+
 func (g *GoL) drawWelcome() {
 	fmt.Fprint(g.buffer, "\x1b[2J") // clear screen (Dracula bg from setupTerm still active)
  
@@ -258,11 +256,11 @@ func (g *GoL) drawWelcome() {
 		g.writeCentered(startRow+i, fgPurple, line)
 	}
 	g.writeCentered(startRow+len(title)+2, fgComment, "p pause    r restart    q quit")
-	g.writeCentered(startRow+len(title)+4, fgGreen, "press any key to start")
+	g.writeCentered(startRow+len(title)+4, fgGreen, "press any key to draw your pattern")
  
 	g.buffer.Flush()
 }
- 
+
 // drawPaused overlays a message over the current grid, without clearing it,
 // so the last generation stays visible underneath. Uses the current-line
 // highlight color as a background bar so the message reads clearly against
@@ -275,6 +273,98 @@ func (g *GoL) drawPaused() {
 	g.buffer.Flush()
 }
 
+// copies a small ASCII pattern into the buffer
+func (g *GoL) stampPattern(pattern []string, row, col int) {
+	for dy, line := range pattern {
+		for dx, ch := range line {
+			i := ((row+dy)%g.height + g.height) % g.height
+			j := ((col+dx)%g.width + g.width) % g.width
+			if ch == 'o' {
+				g.matrix1[i][j] = true
+			}
+		}
+	}
+}
+
+var patternGlider = []string{
+	".o.",
+	"..o",
+	"ooo",
+}
+
+// renders the drawing buffer with the cursor cell highlighted
+// using the current-line background, so you can see where you'll toggle.
+func (g *GoL) drawEditor() {
+	fmt.Fprint(g.buffer, "\x1b[1;1H")
+	fmt.Fprint(g.buffer, fgGreen)
+
+	for i := range g.height {
+		for j := range g.width {
+			atCursor := i == g.cursorRow && j == g.cursorCol
+			if atCursor {
+				fmt.Fprint(g.buffer, bgLine)
+			}
+			if g.matrix1[i][j] {
+				g.buffer.WriteByte(alive)
+			} else {
+				g.buffer.WriteByte(dead)
+			}
+			if atCursor {
+				fmt.Fprint(g.buffer, bgBase) // restore normal background immediately after
+			}
+		}
+	}
+
+	g.writeCentered(g.height, fgComment, "hjkl move  space toggle  g glider  r random  enter start")
+	g.buffer.Flush()
+}
+
+// runEditor blocks, letting the user draw a starting pattern with hjkl +
+// space, until they press enter (start the simulation) or quit.
+func (g *GoL) runEditor(keyCh <-chan byte) {
+	g.cursorRow, g.cursorCol = g.height/2, g.width/2
+	g.drawEditor()
+
+	for {
+		select {
+		case k := <-keyCh:
+			switch k {
+			case 'h':
+				if g.cursorCol > 0 {
+					g.cursorCol--
+				}
+			case 'l':
+				if g.cursorCol < g.width-1 {
+					g.cursorCol++
+				}
+			case 'k':
+				if g.cursorRow > 0 {
+					g.cursorRow--
+				}
+			case 'j':
+				if g.cursorRow < g.height-1 {
+					g.cursorRow++
+				}
+			case ' ':
+				g.toggleCell(g.cursorRow, g.cursorCol)
+			case 'g':
+				g.stampPattern(patternGlider, g.cursorRow, g.cursorCol)
+			case 'r':
+				g.initRandom()
+			case '\r', '\n':
+				return // enter: done drawing, go start the simulation
+			case 'q', 3:
+				g.shutdown()
+				return
+			}
+			g.drawEditor()
+		case <-g.done:
+			return
+		}
+	}
+}
+
+
 func (g *GoL) handleInput(k byte) {
 	switch k {
 	case 'q', 3: //3 = Ctrl+C is disabled in raw mode. it arrives as
@@ -286,15 +376,15 @@ func (g *GoL) handleInput(k byte) {
 			g.drawPaused()
 		}
 	case 'r':
-		g.restart()
+		g.initRandom()
 	}
 }
+
 
 func Run() {
 	g := GoL{}
 	g.init()
 	defer g.cleanupTerm()
-
 
 	// Catch SIGTERM (kill command)
 	sigCh := make(chan os.Signal, 1)
@@ -303,7 +393,6 @@ func Run() {
 		<-sigCh
 		g.shutdown()
 	}()
-
 
 	// reading keyboard input
 	keyCh := make(chan byte)
@@ -318,7 +407,6 @@ func Run() {
 		}
 	}()
 
-
 	// welcome screen: draw ONCE, then block until any key or a shutdown signal
 	// this must happen before the ticker starts, so frame timing begins fresh
 	// once the game actually starts, not from whenever the program launched
@@ -332,12 +420,21 @@ func Run() {
 	}
 
 
+	// editor: draw the starting pattern with hjkl + space. blocks until
+	// enter (start) or q/Ctrl+C (quit before ever playing).
+	g.runEditor(keyCh)
+	select {
+	case <-g.done:
+		return // runEditor already triggered shutdown — don't fall through to the game
+	default:
+	}
+
+
 	// FPS stuff
 	const fps = 10
 	frameDuration := time.Second / time.Duration(fps)
 	ticker := time.NewTicker(frameDuration)
 	defer ticker.Stop()
-
 
 	// MAIN LOOP
 
@@ -361,4 +458,3 @@ func Run() {
 	}
 
 }
-
