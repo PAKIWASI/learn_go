@@ -1,3 +1,4 @@
+// Package gameoflife
 package gameoflife
 
 import (
