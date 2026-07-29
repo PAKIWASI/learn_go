@@ -96,14 +96,19 @@ func (g *GoL) shutdown() {
 	g.doneOnce.Do(func() { close(g.done) })
 }
 
-// init the grid with some random cells alive
-func (g *GoL) initRandom() {
-	// cleanup
+
+// clearGrid sets every cell dead 
+func (g *GoL) clearGrid() {
 	for i := range g.matrix1 {
 		for j := range g.matrix1[i] {
 			g.matrix1[i][j] = false
 		}
 	}
+}
+
+// init the grid with some random cells alive
+func (g *GoL) initRandom() {
+	g.clearGrid()
 
 	// switch on 30% of the cells
 	toCreate := int32(float32(g.width) * float32(g.height) * 0.3)
@@ -119,6 +124,8 @@ func (g *GoL) initRandom() {
 		}
 	}
 }
+
+
 
 func (g *GoL) init() {
 
