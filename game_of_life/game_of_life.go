@@ -25,7 +25,8 @@ const (
 	fgPurple  = "\x1b[38;2;189;147;249m" // #bd93f9
 	fgPink    = "\x1b[38;2;255;121;198m" // #ff79c6
 	fgGreen   = "\x1b[38;2;80;250;123m"  // #50fa7b
-	fgCyan    = "\x1b[38;2;139;233;253m" // #8be9fd
+	fgGreenDim = "\x1b[38;2;52;104;75m"   // dim fgGreen, mostly faded into bgBase
+	fgCyan     = "\x1b[38;2;139;233;253m" // #8be9fd
 )
 
 const (
@@ -220,7 +221,14 @@ func (g *gol) draw() {
 		fmt.Fprintf(g.buffer, "\x1b[%d;2H", i+2)
 		for j := range g.width {
 			if !g.matrix1[i][j] {
-				g.buffer.WriteByte(dead)
+				// cell is dead now but was alive in prev state
+				if g.matrix2[i][j] {
+					fmt.Fprint(g.buffer, fgGreenDim)
+					g.buffer.WriteByte(alive)
+					fmt.Fprint(g.buffer, fgGreen)
+				} else {
+					g.buffer.WriteByte(dead)
+				}
 			} else {
 				g.buffer.WriteByte(alive)
 			}
@@ -482,8 +490,8 @@ func Run() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		<-sigCh		// blocks until sigCh has a value
-		g.shutdown()	// exits the program
+		<-sigCh      // blocks until sigCh has a value
+		g.shutdown() // exits the program
 	}()
 
 	// reading keyboard input as a seperate goroutine
@@ -495,7 +503,7 @@ func Run() {
 			if err != nil || n == 0 {
 				continue
 			}
-			keyCh <- buf[0]	// only waits to write to keyCh if we have to valid key
+			keyCh <- buf[0] // only waits to write to keyCh if we have to valid key
 		}
 	}()
 
@@ -507,13 +515,11 @@ func Run() {
 	g.drawWelcome()
 	g.welcomeLoop(keyCh)
 
-
 	select {
 	case <-g.done:
 		return // 'q'/Ctrl+C during welcome or the editor. don't fall through
 	default:
 	}
-
 
 	// FPS stuff
 	const fps = 10
@@ -542,6 +548,3 @@ func Run() {
 		}
 	}
 }
-
-
-
