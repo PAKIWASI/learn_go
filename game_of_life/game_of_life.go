@@ -17,14 +17,14 @@ import (
 
 // Dracula palette as 24-bit ANSI SGR codes.
 const (
-	cReset    = "\x1b[0m"
-	bgBase    = "\x1b[48;2;40;42;54m"    // #282a36 background
-	bgLine    = "\x1b[48;2;68;71;90m"    // #44475a current-line (highlight bar)
-	fgFg      = "\x1b[38;2;248;248;242m" // #f8f8f2 foreground
-	fgComment = "\x1b[38;2;98;114;164m"  // #6272a4 comment (dim text)
-	fgPurple  = "\x1b[38;2;189;147;249m" // #bd93f9
-	fgPink    = "\x1b[38;2;255;121;198m" // #ff79c6
-	fgGreen   = "\x1b[38;2;80;250;123m"  // #50fa7b
+	cReset     = "\x1b[0m"
+	bgBase     = "\x1b[48;2;40;42;54m"    // #282a36 background
+	bgLine     = "\x1b[48;2;68;71;90m"    // #44475a current-line (highlight bar)
+	fgFg       = "\x1b[38;2;248;248;242m" // #f8f8f2 foreground
+	fgComment  = "\x1b[38;2;98;114;164m"  // #6272a4 comment (dim text)
+	fgPurple   = "\x1b[38;2;189;147;249m" // #bd93f9
+	fgPink     = "\x1b[38;2;255;121;198m" // #ff79c6
+	fgGreen    = "\x1b[38;2;80;250;123m"  // #50fa7b
 	fgGreenDim = "\x1b[38;2;52;104;75m"   // dim fgGreen, mostly faded into bgBase
 	fgCyan     = "\x1b[38;2;139;233;253m" // #8be9fd
 )
