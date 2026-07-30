@@ -8,7 +8,7 @@ import (
 
 
 // we have successfully synchronized access to the memory
-func manual_sync() {
+func manualSync() {
 	var memoryAccess sync.Mutex
 	var value int
 	go func() {
@@ -24,5 +24,5 @@ func manual_sync() {
 
 
 func Run() {
-	manual_sync()
+	manualSync()
 }

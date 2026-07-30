@@ -450,7 +450,6 @@ func (g *gol) handleInput(k byte, keyCh <-chan byte) {
 }
 
 func (g *gol) welcomeLoop(keyCh <-chan byte) {
-
 welcomeLoop:
 	for {
 		select {
@@ -483,20 +482,20 @@ func Run() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		<-sigCh
-		g.shutdown()
+		<-sigCh		// blocks until sigCh has a value
+		g.shutdown()	// exits the program
 	}()
 
-	// reading keyboard input
+	// reading keyboard input as a seperate goroutine
 	keyCh := make(chan byte)
+	buf := make([]byte, 1)
 	go func() {
-		buf := make([]byte, 1)
 		for {
 			n, err := os.Stdin.Read(buf)
 			if err != nil || n == 0 {
 				continue
 			}
-			keyCh <- buf[0]
+			keyCh <- buf[0]	// only waits to write to keyCh if we have to valid key
 		}
 	}()
 

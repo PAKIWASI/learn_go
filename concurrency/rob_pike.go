@@ -3,6 +3,7 @@ package concurrency
 
 import (
 	"fmt"
+	"time"
 )
 
 /* Rob Pike Google I/0 2012
@@ -148,10 +149,89 @@ func runmessage() {
 	fmt.Println("done")
 }
 
+// pattern 4 : select statement
+// a control structure for concurrency. It provides a way to handle multiple channels. It's like a switch but each case is a communication
+// Each case is some expression or assignemnt that waits to receive a value from a channel
+// All channels are evaluated and selection blocks until one communication can proceed. If multipe can proceed, select chooses pseudo-randomly
+// A default clause, if present, executes immediatly if no channel is ready. Else, it blocks until any channel is ready
+// IMP: select only handles one communication then falls through. to run until some break, wrap it on a for {}
+
+func runselect() {
+	c := fanInSelect(gen("hello"), gen("wtf"))
+	for range 10 {
+		fmt.Println(<-c)
+	}
+	fmt.Println("done")
+}
+func fanInSelect(a, b <-chan string) <-chan string {
+	c := make(chan string)
+	go func() {
+		for { // without the for loop, only one communication is handled then select ends. Then the second <-c in main would deadlock
+			select {
+			case s := <-a:
+				c <- s
+			case s := <-b:
+				c <- s
+			}
+		}
+	}()
+	return c
+}
+
+// pattern 5 : timeout
+// select between 2 channels, one is the work and other is the time.After function which will send a message to the channel after
+// specified time has passed, then we return from the select
+
+func runtimeout() {
+	c := gen("Joe")
+	for {
+		select {
+		case s := <-c:
+			fmt.Println(s)
+		case <-time.After(1 * time.Nanosecond):
+			fmt.Println("your too slow")
+			return // returns from the for {}
+		}
+	}
+}
+
+// pattern 6 : quit channel
+
+func genquit(msg string, quit chan bool) <-chan string {
+	c := make(chan string)
+	go func() {
+		for i := 0; ; i++ {
+			select {
+			// send value case
+			case c <- fmt.Sprintf("%s %d", msg, i):
+				// sent successfully, keep going
+			// receive value case
+			case <-quit:
+				fmt.Println("cleaning up,", msg, "is quitting")
+				return
+			}
+		}
+	}()
+	return c
+}
+func runquit() {
+	quit := make(chan bool)
+	c := genquit("joe", quit)
+	for range 3 {
+		fmt.Println(<-c)
+	}
+	quit <- true // genquit goroutine is listening
+	fmt.Println("done")
+}
+
+
+
 func Runrobpike() {
 	// channelBlocking()
 	// channelGenerator()
 	// fanRun()
-	runmessage()
-
+	// runmessage()
+	// runselect()
+	// runtimeout()
+	runquit()
 }
