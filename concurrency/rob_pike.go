@@ -25,18 +25,18 @@ So channels do both: COMMUNICATION and SYNCRONIZATION in a single operation
 
 // eg 1
 func channelBlocking() {
-	ch := make(chan string)		// unbuffered channel
-	go borin("hello", ch)	// lauch a function with the challen
+	ch := make(chan string) // unbuffered channel
+	go borin("hello", ch)   // lauch a function with the challen
 	for range 5 {
-		fmt.Println(<-ch)	// each iteration blocks for a value to arrive into ch
+		fmt.Println(<-ch) // each iteration blocks for a value to arrive into ch
 	}
 	// runs 5 times, blocks 5 times, get's a value, prints, then loop exits
 
 	fmt.Println("im done")
 }
 func borin(msg string, c chan string) {
-	for i := 0; ; i++ {	// runs forever
-		c <- fmt.Sprintf("i got : %s %d", msg, i)	// sends this string to a channel
+	for i := 0; ; i++ { // runs forever
+		c <- fmt.Sprintf("i got : %s %d", msg, i) // sends this string to a channel
 		fmt.Println("sent")
 		// blocks until someone receives it
 	}
@@ -56,7 +56,7 @@ func channelGenerator() {
 
 	fmt.Println("im done")
 }
-func gen(msg string) <-chan string {
+func gen(msg string) <-chan string { // returns a receive-only channel of type string
 	c := make(chan string)
 	go func() {
 		for i := 0; ; i++ {
@@ -67,13 +67,34 @@ func gen(msg string) <-chan string {
 }
 
 // pattern 2 : multiplexing
-// what if one you launch 2 worker goroutines but one 
+// what if one you launch 2 worker goroutines but what if one is ready to send a value but the other is blocked, so it has to wait too
+// not desired if one worker might send more data more frequently than the other
+// we fix this my making a fan-in function (a multiplexer)
+// instead of blocking, now we let any worker (who is ready) send to a channel
+func fanRun() {
+	c := fanIn(gen("hello"), gen("wtf"))
+	for range 10 {
+		fmt.Println(<-c)
+	}
+}
+func fanIn(a, b <-chan string) <-chan string {
+	c := make(chan string)
+	go func() {
+		for {
+			c <- <-a	// if you receive a value in a, send it in c
+		}
+	}()
+	go func() {
+		for {
+			c <- <-b	// if you receive a value in b, also send it to c
+		}
+	}()
+	return c	// if value arrives at a OR b, c will get it.
+	// so now we channel both a and b through c so c is only waiting if both a and b are not ready
+	// a and b never have to wait
+}
 
-
-
-func Run() {
-
+func Runrobpike() {
 	// channelBlocking()
 	channelGenerator()
-
 }
