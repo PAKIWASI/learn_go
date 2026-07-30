@@ -113,6 +113,7 @@ func (g *gol) clearGrid() {
 	for i := range g.matrix1 {
 		for j := range g.matrix1[i] {
 			g.matrix1[i][j] = false
+			g.matrix2[i][j] = false
 		}
 	}
 }
