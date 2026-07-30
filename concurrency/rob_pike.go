@@ -45,7 +45,7 @@ func borin(msg string, c chan string) {
 // pattern 1
 // gen() starts computation concurrently and returns a channel
 // so we can communicate with the goroutine (the worker)
-// Due to the syncronization, both workers take a turn do their computation in turns
+// Due to the syncronization, both workers take a turn do their computation in turns and also print in turn
 func channelGenerator() {
 	c := gen("hello")
 	d := gen("wtf")
@@ -76,25 +76,82 @@ func fanRun() {
 	for range 10 {
 		fmt.Println(<-c)
 	}
+	fmt.Println("done")
 }
+
+//	a \
+//		c	-> main print
+//
+// b /
 func fanIn(a, b <-chan string) <-chan string {
 	c := make(chan string)
 	go func() {
 		for {
-			c <- <-a	// if you receive a value in a, send it in c
+			c <- <-a // if you receive a value in a, send it in c
 		}
 	}()
 	go func() {
 		for {
-			c <- <-b	// if you receive a value in b, also send it to c
+			c <- <-b // if you receive a value in b, also send it to c
 		}
 	}()
-	return c	// if value arrives at a OR b, c will get it.
+	return c // if value arrives at a OR b, c will get it.
 	// so now we channel both a and b through c so c is only waiting if both a and b are not ready
 	// a and b never have to wait
 }
 
+// pattern 3:
+// pattern 2 is cool but what if you want a garentee that both workers execute one after the other ie take turns
+
+// sending a channle on a channle, making a goroutine wait it's turn
+// receive all messages, then enable them again by sending on a private channel
+// first we define a message type that contains a channel for the reply
+
+// each worker owns a private waitForIt channel and hands a reference to it to the receiver bundled with its message.
+// The receiver collects one message from each worker, prints both, and only then sends true back down each private channel
+// that's the "send a channel on a channel" trick letting the receiver control exactly when each goroutine is allowed to proceed again.
+
+type Message struct {
+	str  string    // the message we want to print
+	wait chan bool // worker blocks on wait until user says "go"
+}
+
+func boring(msg string, c chan Message) {
+	waitForIt := make(chan bool)
+	for i := 0; ; i++ {
+		// send a message to c with a wait channel attached
+		c <- Message{fmt.Sprintf("%s %d", msg, i), waitForIt}
+		<-waitForIt // block here until the receiver says "go", meaning until waitforit receives a value
+	}
+}
+func runmessage() {
+	c := make(chan Message) // fan-in channel
+	// these 2 workers will send messages to c
+	go boring("Joe", c)
+	go boring("Ann", c)
+
+	for range 5 {
+		// this lines blocks until one worker sends a value
+		// whichever worker sent message first to c has his message arrived here and is blocked, waiting for a value for it's wait field
+		msg1 := <-c
+		fmt.Println(msg1.str)
+		// the other one now sends the value to c
+		msg2 := <-c
+		fmt.Println(msg2.str)
+		// we first send true to the first worker - meaning the worker that came first, so it waits first too
+		// we don't care if msg1 was sent by the first worker or the second, we just block it as it arrived first
+		msg1.wait <- true
+		msg2.wait <- true
+	}
+	// Every round pairs exactly one Joe message with one Ann message at the same iteration count. That's the guarantee
+	// not that Joe always goes first, but that both workers advance in lockstep, one increment each, every round
+	fmt.Println("done")
+}
+
 func Runrobpike() {
 	// channelBlocking()
-	channelGenerator()
+	// channelGenerator()
+	// fanRun()
+	runmessage()
+
 }
