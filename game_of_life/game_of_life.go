@@ -42,7 +42,7 @@ const (
 	alive byte = 'o'
 )
 
-type GoL struct {
+type gol struct {
 	// terminal dimentions
 	width  int
 	height int
@@ -69,7 +69,7 @@ type GoL struct {
 }
 
 // get width, height of user's actual terminal
-func (g *GoL) setTermDims() {
+func (g *gol) setTermDims() {
 	width, height, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil {
 		log.Fatal(err)
@@ -80,7 +80,7 @@ func (g *GoL) setTermDims() {
 }
 
 // enter raw mode, hide cursor etc
-func (g *GoL) setupTerm() {
+func (g *gol) setupTerm() {
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		log.Fatal(err)
@@ -94,7 +94,7 @@ func (g *GoL) setupTerm() {
 }
 
 // exit raw mode, show curser etc
-func (g *GoL) cleanupTerm() {
+func (g *gol) cleanupTerm() {
 	term.Restore(int(os.Stdin.Fd()), g.oldState)
 	fmt.Fprint(g.buffer, cReset)      // drop the Dracula bg/fg back to terminal defaults
 	fmt.Fprint(g.buffer, "\x1b[?25h") // show
@@ -103,12 +103,12 @@ func (g *GoL) cleanupTerm() {
 
 // shutdown signals every goroutine watching g.done to stop.
 // safe to call multiple times / from multiple goroutines concurrently.
-func (g *GoL) shutdown() {
+func (g *gol) shutdown() {
 	g.doneOnce.Do(func() { close(g.done) })
 }
 
 // sets every cell dead
-func (g *GoL) clearGrid() {
+func (g *gol) clearGrid() {
 	for i := range g.matrix1 {
 		for j := range g.matrix1[i] {
 			g.matrix1[i][j] = false
@@ -117,7 +117,7 @@ func (g *GoL) clearGrid() {
 }
 
 // init the grid with some random cells alive
-func (g *GoL) initRandom() {
+func (g *gol) initRandom() {
 	g.clearGrid()
 
 	// switch on 30% of the cells
@@ -135,7 +135,7 @@ func (g *GoL) initRandom() {
 	}
 }
 
-func (g *GoL) init() {
+func (g *gol) init() {
 
 	g.done = make(chan struct{})
 
@@ -163,12 +163,12 @@ func (g *GoL) init() {
 }
 
 // flips a single cell
-func (g *GoL) toggleCell(i, j int) {
+func (g *gol) toggleCell(i, j int) {
 	g.matrix1[i][j] = !g.matrix1[i][j]
 }
 
 // given a cell (i, j) count how many of its neighbours are alive
-func (g *GoL) countNeighbours(i, j int) int {
+func (g *gol) countNeighbours(i, j int) int {
 	count := 0
 	// dy and dx get all 8 neighbours
 	for dy := -1; dy <= 1; dy++ {
@@ -189,7 +189,7 @@ func (g *GoL) countNeighbours(i, j int) int {
 }
 
 // update loop
-func (g *GoL) update() {
+func (g *gol) update() {
 
 	for i := range g.height {
 		for j := range g.width {
@@ -209,7 +209,7 @@ func (g *GoL) update() {
 	g.matrix2 = temp
 }
 
-func (g *GoL) draw() {
+func (g *gol) draw() {
 	// set green foreground ONCE for the whole frame
 	fmt.Fprint(g.buffer, fgGreen)
 
@@ -232,7 +232,7 @@ func (g *GoL) draw() {
 
 // draws a rounded border around the full terminal once.
 // this must be re-called after any full-screen clear (\x1b[2J),
-func (g *GoL) drawBorder() {
+func (g *gol) drawBorder() {
 	fmt.Fprint(g.buffer, fgPurple)
 
 	// top edge
@@ -289,14 +289,14 @@ func bigText(s string) []string {
 }
 
 // writes s centered horizontally at terminal row (1-indexed)
-func (g *GoL) writeCentered(row int, color, s string) {
+func (g *gol) writeCentered(row int, color, s string) {
 	col := max((g.width-len([]rune(s)))/2, 0)
 	fmt.Fprintf(g.buffer, "\x1b[%d;%dH%s%s", row, col+1, color, s)
 }
 
 // shows the title and the three welcome-screen actions
 // d = draw your own pattern, r = start with a random pattern, q = quit
-func (g *GoL) drawWelcome() {
+func (g *gol) drawWelcome() {
 	fmt.Fprint(g.buffer, "\x1b[2J") // clear screen (Dracula bg from setupTerm still active)
 	g.drawBorder()
 
@@ -312,7 +312,7 @@ func (g *GoL) drawWelcome() {
 }
 
 // overlays a message over the current grid, without clearing it
-func (g *GoL) drawPaused() {
+func (g *gol) drawPaused() {
 	msg := " PAUSED — p resume   c clear   d draw   r random   q quit "
 	col := max((g.width-len([]rune(msg)))/2, 0)
 	row := g.height / 2
@@ -322,7 +322,7 @@ func (g *GoL) drawPaused() {
 }
 
 // copies a small ASCII pattern into the buffer
-func (g *GoL) stampPattern(pattern []string, row, col int) {
+func (g *gol) stampPattern(pattern []string, row, col int) {
 	for dy, line := range pattern {
 		for dx, ch := range line {
 			i := ((row+dy)%g.height + g.height) % g.height
@@ -344,7 +344,7 @@ var patternGlider = []string{
 // renders the drawing buffer with the cursor cell highlighted
 // hint is the bottom-row instruction text lets callers say "enter start"
 // on first entry or "enter resume" when re-opened from the pause menu
-func (g *GoL) drawEditor(hint string) {
+func (g *gol) drawEditor(hint string) {
 	fmt.Fprint(g.buffer, fgGreen)
 
 	for i := range g.height {
@@ -371,7 +371,7 @@ func (g *GoL) drawEditor(hint string) {
 
 // draw a starting pattern with hjkl + space, until they press enter (start/resume) or quit
 // hint is passed straight through to drawEditor now
-func (g *GoL) runEditor(keyCh <-chan byte, hint string) {
+func (g *gol) runEditor(keyCh <-chan byte, hint string) {
 	g.cursorRow, g.cursorCol = g.height/2, g.width/2
 	g.drawEditor(hint)
 
@@ -417,7 +417,7 @@ func (g *GoL) runEditor(keyCh <-chan byte, hint string) {
 // handles keys during actual gameplay (both running and
 // paused). keyCh is only needed for the 'd' (draw again) pause action
 // which re-enters the blocking editor loop
-func (g *GoL) handleInput(k byte, keyCh <-chan byte) {
+func (g *gol) handleInput(k byte, keyCh <-chan byte) {
 	switch k {
 	case 'q', 3: //3 = Ctrl+C is disabled in raw mode. it arrives as
 		// this raw byte over stdin instead, and must be handled like any other key
@@ -449,7 +449,7 @@ func (g *GoL) handleInput(k byte, keyCh <-chan byte) {
 	}
 }
 
-func (g *GoL) welcomeLoop(keyCh <-chan byte) {
+func (g *gol) welcomeLoop(keyCh <-chan byte) {
 
 welcomeLoop:
 	for {
@@ -475,7 +475,7 @@ welcomeLoop:
 
 func Run() {
 
-	g := GoL{}
+	g := gol{}
 	g.init()
 	defer g.cleanupTerm()
 
