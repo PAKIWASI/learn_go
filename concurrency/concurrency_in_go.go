@@ -244,10 +244,43 @@ func runchannel() {
 // 1. Knowing when a channel is closed
 // 2. Responsibly handling blocking for any reason
 
+func runchanowner() {
+	// create a goroutine that clearly owns a channel, and a consumer that clearly handles blocking and closing of a channel
+	chanOwner := func() <-chan int {
+		// buffered channel. Since we know we’ll produce six results, we create a buffered channel of five
+		// so that the goroutine can complete as quickly as possible
+		resultStream := make(chan int, 5)
+		// performs writes on resultStream. we’ve inverted how we create goroutines. It is now encapsulated within the surrounding function
+		go func() {
+			// ensure resultStream is closed once we’re finished with it. As the channel owner, this is our responsibility
+			defer close(resultStream)
+			for i := range 15 {
+				resultStream <- i // write 10 ints
+			}
+		}()
+		// since the return value is declared as a read-only channel, resultStream will implicitly be converted to read-only for consumers
+		return resultStream
+	}
+	// Since the return value is declared as a read-only channel, resultStream will implicitly be converted to read-only for consumers
+	resultStream := chanOwner()
+	// As a consumer, we are only concerned with blocking and closed channels.
+	for result := range resultStream {
+		fmt.Println("len: ", len(resultStream))
+		fmt.Printf("Received: %d\n", result)
+	}
+	fmt.Println("Done receiving!")
 
+	/*
+		1. Producer starts immediately in its goroutine and races ahead: resultStream <- 0, 1, 2, 3, 4 fill the buffer to capacity 5.
+			It then tries resultStream <- 5 — this blocks, since the buffer is full and there's no room.
+		2. Consumer's range receives — say it gets 0. The moment that receive completes, the buffer has room again (4 items in it, 1 free slot).
+			This simultaneously unblocks the producer, which is sitting there waiting exactly for that.
+		3. Now it's a race: does the producer manage to push 5 into that freed slot before your Println("len: ", len(resultStream)) executes?
+			If yes → you see len: 5 (it got refilled). If the print wins the race → you see len: 4.
 
-
-
+		len(ch) on a buffered channel is a live number of items currently sitting in the buffer
+	*/
+}
 
 func Run() {
 	// manualSync()
@@ -257,6 +290,6 @@ func Run() {
 	// runcond()
 	// runonce()
 	// runpool()
-	runchannel()
-
+	// runchannel()
+	runchanowner()
 }
