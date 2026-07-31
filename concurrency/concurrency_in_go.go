@@ -13,14 +13,17 @@ func manualSync() {
 	var value int
 	go func() {
 		memoryAccess.Lock()
+		defer memoryAccess.Unlock()
 		value++
-		memoryAccess.Unlock()
 	}()
 	memoryAccess.Lock()
+	defer memoryAccess.Unlock()
 	if value == 0 {
 		fmt.Printf("the value is %v.\n", value)
 	}
 }
+
+// wait group
 
 func waitGroup() {
 	var wg sync.WaitGroup
@@ -41,13 +44,16 @@ func waitGroup2() {
 	// 	defer wg.Done()
 	// 	salutation = "welcome"
 	// }()
+
+	// the Go func increments wait group, runs the func provided then decrements it again
 	wg.Go(func() {
 		salutation = "welcome"
 	})
-
 	wg.Wait()
 	fmt.Println(salutation)
 }
+
+// goroutine memory usage
 
 func mem() {
 	memConsumed := func() uint64 {
@@ -70,9 +76,55 @@ func mem() {
 	fmt.Printf("%.3fkb", float64(after-before)/numGoroutines/1000)
 }
 
+//  sync.Cond
+
+// Button type that contains a condition `Clicked`
+type Button struct {
+	Clicked *sync.Cond
+}
+func runcond() {
+	button := Button{Clicked: sync.NewCond(&sync.Mutex{})}
+
+	// a convenience function that will allow us to register functions to
+	// handle signals from a condition. Each handler is run on its own goroutine, and
+	// subscribe will not exit until that goroutine is confirmed to be running.
+	subscribe := func(c *sync.Cond, fn func()) {
+		var goroutineRunning sync.WaitGroup
+		goroutineRunning.Add(1)	// increment counter
+		go func() {
+			goroutineRunning.Done()	// decrement : goroutine confirmed to be running
+			c.L.Lock()	// need to lock because c.Wait() calls unlock() on enter 
+			defer c.L.Unlock()	// need to unlock at end as c.Wait() calls lock() on exit
+			c.Wait()	// Here we wait to be notified that the condition has occurred. This is a blocking call and the goroutine will be suspended
+			fn()		// hanler for the condition
+		}()
+		goroutineRunning.Wait()	// subscribe doesnot return until we are confirm that goroutine is running
+	}
+
+	var clickRegistered sync.WaitGroup
+	clickRegistered.Add(3)
+	subscribe(button.Clicked, func() {
+		fmt.Println("Maximizing window.")
+		clickRegistered.Done()
+	})
+	subscribe(button.Clicked, func() {
+		fmt.Println("Displaying annoying dialog box!")
+		clickRegistered.Done()
+	})
+	subscribe(button.Clicked, func() {
+		fmt.Println("Mouse clicked.")
+		clickRegistered.Done()
+	})
+	button.Clicked.Broadcast()
+	clickRegistered.Wait()
+}
+
+
+
 func Run() {
 	// manualSync()
 	// waitGroup()
 	// waitGroup2()
-	mem()
+	// mem()
+	runcond()
 }
