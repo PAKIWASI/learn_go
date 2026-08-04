@@ -5,12 +5,13 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand/v2"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
 
 // following the book : Concurrency in Go (chap 4)
-
 
 /* Confinement
 
@@ -272,11 +273,719 @@ func runreadblockedFIXED() {
 	time.Sleep(1 * time.Second)
 }
 
-/*
+/* The or-channel
 
+you may find yourself wanting to combine one or more done channels into a
+single done channel that closes if any of its component channels close. It is perfectly
+acceptable, albeit verbose, to write a select statement that performs this coupling;
+however, sometimes you can’t know the number of done channels you’re working
+with at runtime. In this case, or if you just prefer a one-liner, you can combine these
+channels together using the or-channel pattern.
+This pattern creates a composite done channel through recursion and goroutines.
 
 */
 
+func runorchannel() {
+
+	// variable `or` of type func()
+	var or func(channels ...<-chan any) <-chan any
+	// `or` takes in a variadic slice of channels and returns a single channel
+	or = func(channels ...<-chan any) <-chan any {
+		// base cases for recursive function
+		switch len(channels) {
+		case 0:
+			return nil
+		case 1:
+			return channels[0]
+		}
+		orDone := make(chan any)
+		// we create a goroutine so that we can wait for messages on our channels without blocking
+		go func() {
+			defer close(orDone)
+			switch len(channels) {
+			// every recursive call to or will at least have two channels. As an optimization to keep the number of goroutines constrained,
+			// we place a special case here for calls to or with only two channels
+			case 2:
+				select {
+				case <-channels[0]:
+				case <-channels[1]:
+				}
+			// recursively create an or-channel from all the channels in our slice after the third index, and then select from this
+			// This recurrence relation will destructure the rest of the slice into or-channels to form a tree from which the first signal will return
+			// We also pass in the orDone channel so that when goroutines up the tree exit, goroutines down the tree also exit
+			default:
+				select {
+				case <-channels[0]:
+				case <-channels[1]:
+				case <-channels[2]:
+				case <-or(append(channels[3:], orDone)...):
+				}
+			}
+		}()
+		return orDone
+	}
+
+	// This is a fairly concise function that enables you to combine any number of channels
+	// together into a single channel that WILL CLOSE AS SOON AS ANY OF ITS COMPONENT CHANNELS
+	// ARE CLOSED, OR WRITTEN TO. Let’s take a look at how we can use this function. Here’s a brief example that takes channels
+	// that close after a set duration, and uses the `or` function to combine these into a single channel that closes
+
+	// creates a channel that closes after the time specified
+	sig := func(after time.Duration) <-chan any {
+		c := make(chan any)
+		go func() {
+			defer close(c)
+			time.Sleep(after)
+		}()
+		return c
+	}
+	start := time.Now()
+	// wait on the retured channel
+	<-or(
+		// pass 5 channels as variadic args
+		sig(2*time.Hour),
+		sig(5*time.Minute),
+		sig(1*time.Second),
+		sig(1*time.Hour),
+		sig(1*time.Minute),
+	) // this blocks until any one of the channels closes
+	fmt.Printf("done after %v", time.Since(start))
+
+	// despite placing several channels in our call to or that take various times to
+	// close, our channel that closes after one second causes the entire channel created by
+	// the call to `or` to close. This is because despite its place in the tree the `or` function
+	// builds it will always close first and thus the channels that depend on its closure will close as well
+
+	// We achieve this terseness at the cost of additional goroutines—f(x)=⌊x/2⌋ where x is
+	// the number of goroutines—but remember that one of Go’s strengths is the ability to quickly create, schedule, and run goroutines
+
+	// This pattern is useful to employ at the intersection of modules in your system
+	// At these intersections, you tend to have multiple conditions for canceling trees of goroutines
+	// through your call stack. Using the or function, you can simply combine these together and pass it down the stack
+}
+
+/* Error Handling (for concurrent programs)
+
+The most fundamental question when thinking about error handling is, “Who should
+be responsible for handling the error?” At some point, the program needs to stop ferrying
+the error up the stack and actually do something with it. What is responsible for this?
+
+With concurrent processes, this question becomes a little more complex
+Because a concurrent process is operating independently of its parent or siblings,
+it can be difficult for it to reason about what the right thing to do with the error is
+
+*/
+
+func runerrproblem() {
+
+	checkStatus := func(
+		done <-chan any,
+		urls ...string,
+	) <-chan *http.Response {
+		responses := make(chan *http.Response)
+		go func() {
+			defer close(responses)
+			for _, url := range urls {
+				resp, err := http.Get(url)
+				// Here we see the goroutine doing its best to signal that there’s an error. What else can it do?
+				// It can’t pass it back! How many errors is too many? Does it continue making requests?
+				if err != nil {
+					fmt.Println(err)
+					continue
+				}
+				select {
+				case <-done:
+					return
+				case responses <- resp:
+				}
+			}
+		}()
+		return responses
+	}
+
+	done := make(chan any)
+	defer close(done)
+	urls := []string{"https://www.google.com", "https://badhost"}
+	for response := range checkStatus(done, urls...) {
+		fmt.Printf("Response: %v\n", response.Status)
+	}
+
+	// the goroutine has been given no choice in the matter. It can’t simply
+	// swallow the error, and so it does the only sensible thing: it prints the error and hopes
+	// something is paying attention. Don’t put your goroutines in this awkward position
+}
+
+// separate your concerns: in general, your concurrent processes should
+// send their errors to another part of your program that has complete information
+// about the state of your program, and can make a more informed decision about what to do
+
+func runerrsol() {
+
+	// type that encompasses both the *http.Response and the error possible from an iteration of the loop within our goroutine
+	// TODO: union, or std::expected, std::optional ??
+	type Result struct {
+		Error    error
+		Response *http.Response
+	}
+
+	//  returns a channel that can be read from to retrieve results of an iteration of our loop
+	checkStatus := func(done <-chan any, urls ...string) <-chan Result {
+		results := make(chan Result)
+		go func() {
+			defer close(results)
+			for _, url := range urls {
+				var result Result
+				resp, err := http.Get(url)
+				result = Result{Error: err, Response: resp}
+				select {
+				case <-done:
+					return
+				case results <- result: // write results to our channel
+				}
+			}
+		}()
+		return results
+	}
+
+	done := make(chan any)
+	defer close(done)
+	urls := []string{"https://www.google.com", "https://badhost"}
+	for result := range checkStatus(done, urls...) {
+		if result.Error != nil {
+			fmt.Printf("error: %v", result.Error)
+			continue
+		}
+		fmt.Printf("Response: %v\n", result.Response.Status)
+	}
+
+	// we are able to deal with errors coming out of the goroutine started by checkStatus intelligently
+	// and with the full context of the larger program
+
+	// we’ve coupled the potential result with the potential error. This represents the complete set of possible outcomes created from the goroutine
+	// checkStatus, and allows our main goroutine to make decisions about what to do when errors occur.
+	// In broader terms, we’ve successfully separated the concerns of error handling from our producer goroutine
+	// This is desirable because the goroutine that spawned the producer goroutine—in this case our main goroutine—has more
+	// context about the running program, and can make more intelligent decisions about what to do with errors
+}
+
+/* Pipeline
+
+A pipeline is just another tool you can use to form an abstraction in your system. In
+particular, it is a very powerful tool to use when your program needs to process
+streams, or batches of data. The word pipeline is believed to have first been used in
+1856, and likely referred to a line of pipes that transported liquid from one place to
+another. We borrow this term in computer science because we’re also transporting
+something from one place to another: data. A pipeline is nothing more than a series
+of things that take data in, perform an operation on it, and pass the data back out. We
+call each of these operations a stage of the pipeline.
+
+By using a pipeline, you separate the concerns of each stage, which provides numerous benefits.
+You can modify stages independent of one another, you can mix and match how stages are combined independent of modifying the stages
+you can process each stage concurrent to upstream or downstream stages, and you can fan-out, or rate-limit portions of your pipeline
+
+*/
+
+func runpipeline() {
+	// takes a slice of integers in with a multiplier, loops through them multiplying as it goes, and returns a new transformed slice out.
+	multiply := func(values []int, multiplier int) []int {
+		multipliedValues := make([]int, len(values))
+		for i, v := range values {
+			multipliedValues[i] = v * multiplier
+		}
+		return multipliedValues
+	}
+	// creates a new slice and adds a value to each element
+	add := func(values []int, additive int) []int {
+		addedValues := make([]int, len(values))
+		for i, v := range values {
+			addedValues[i] = v + additive
+		}
+		return addedValues
+	}
+
+	// combine the two
+
+	ints := []int{1, 2, 3, 4}
+	// we combine add and multiply within the range clause
+	for _, v := range add(multiply(ints, 2), 1) {
+		fmt.Println(v)
+	}
+
+	// we constructed them to have the properties of a pipeline stage, we’re able to combine them to form a pipeline
+
+	/*
+		the properties of a pipeline stage:
+		• A stage consumes and returns the same type.
+		• A stage must be reified by the language so that it may be passed around. Functions in Go are reified and fit this purpose nicely
+
+		reification means that the language exposes a concept to the developers so
+		that they can work with it directly. Functions in Go are said to be reified because you can define variables that
+		have a type of a function signature. This also means you can pass functions around your program
+
+		functional programming people thinking in terms of higher order functions and monads. pipeline stages are
+		very closely related to functional programming and can be considered a SUBSET OF MONADS
+	*/
+
+	// each stage is taking a slice of data and returning a slice of data. These stages are performing what we call BATCH PROCESSING
+	// This just means that they operate on chunks of data all at once instead of one discrete value at a time. There is another
+	// type of pipeline stage that performs STREAM PROCESSING. This means that the stage receives and emits one element at a time
+
+	// notice that for the original data to remain unaltered, each stage has to make a new slice of
+	// equal length to store the results of its calculations. That means that the memory footprint of our
+	// program at any one time is double the size of the slice we send into the start of our pipeline.
+	// let's convert it to stream processing:
+
+	fmt.Println()
+	xply := func(value, multiplier int) int {
+		return value * multiplier
+	}
+	ad := func(value, additive int) int {
+		return value + additive
+	}
+	i := []int{1, 2, 3, 4}
+	for _, v := range i {
+		fmt.Println(xply(ad(xply(v, 2), 1), 2))
+	}
+
+	// Each stage is receiving and emitting a discrete value, and the memory footprint of
+	// our program is back down to only the size of the pipeline’s input. But we had to pull
+	// the pipeline down into the body of the for loop and let the range do the heavy lifting
+	// of feeding our pipeline. Not only does this limit the reuse of how we feed the pipeline,
+	// but as we’ll see later in this section, it also limits our ability to scale. We have other
+	// problems too. Effectively, we’re instantiating our pipeline for every iteration of the
+	// loop. Though it’s cheap to make function calls, we’re making three function calls for
+	// each iteration of the loop. And what about concurrency? I stated earlier that one of
+	// the benefits of utilizing pipelines was the ability to process individual stages concur‐
+	// rently, and I mentioned something about fan-out. Where does all that come in?
+}
+
+/* Pipelines best practices
+
+Channels are uniquely suited to constructing pipelines in Go because they fulfill all of
+our basic requirements. They can receive and emit values, they can safely be used
+concurrently, they can be ranged over, and they are reified by the language.
+*/
+
+func runpipelinechannels() {
+
+	//  They all look like they start one goroutine inside their bodies, and use the pattern we established in “Preventing Goroutine Leaks”
+
+	// converts a discrete set of values into a stream of data on a channel
+	generator := func(done <-chan any, integers ...int) <-chan int {
+		intStream := make(chan int, len(integers)) // buffered channel with length of integers
+		go func() {
+			defer close(intStream)
+			for _, i := range integers {
+				select {
+				case <-done:
+					return
+				case intStream <- i:
+				}
+			}
+		}()
+		return intStream
+	}
+
+	multiply := func(
+		done <-chan any,
+		intStream <-chan int,
+		multiplier int,
+	) <-chan int {
+		multipliedStream := make(chan int)
+		go func() {
+			defer close(multipliedStream)
+			for i := range intStream {
+				select {
+				case <-done:
+					return
+				case multipliedStream <- i * multiplier:
+				}
+			}
+		}()
+		return multipliedStream
+	}
+
+	add := func(
+		done <-chan any,
+		intStream <-chan int,
+		additive int,
+	) <-chan int {
+		addedStream := make(chan int)
+		go func() {
+			defer close(addedStream)
+			for i := range intStream {
+				select {
+				case <-done:
+					return
+				case addedStream <- i + additive:
+				}
+			}
+		}()
+		return addedStream
+	}
+
+	done := make(chan any)
+	defer close(done) // ensure our program exits cleanly with the `done` pattern
+	intStream := generator(done, 1, 2, 3, 4)
+	// pipeline is a channel
+	// each stage we can safely execute concurrently because our inputs and outputs are safe in concurrent contexts
+	// each stage of the pipeline is executing concurrently. This means that any stage only need wait for its inputs
+	// and to be able to send its outputs
+	pipeline := multiply(done, add(done, multiply(done, intStream, 2), 1), 2)
+	// range over a channel
+	for v := range pipeline {
+		fmt.Println(v)
+	}
+
+	/*
+		The stages are interconnected in two ways: by the common done channel, and by the
+		channels that are passed into subsequent stages of the pipeline. In other words, the
+		channel created by the multiply function is passed into the add function, and so forth
+
+		closing the done channel cascades through the pipeline This is made possible by two things in each stage of the pipeline:
+		• Ranging over the incoming channel. When the incoming channel is closed, the range will exit.
+		• The send sharing a select statement with the done channel.
+
+		There is a recurrence relation at play here. At the beginning of the pipeline, we’ve
+		established that we must convert discrete values into a channel. There are two points in this process that must be preemptable:
+		• Creation of the discrete value that is not nearly instantaneous.
+		• Sending of the discrete value on its channel.
+
+		The first is up to you. In our example, in the generator function, the discrete values
+		are generated by ranging over the variadic slice, which is instantaneous enough that it
+		doesn’t need to be preemptable. The second is handled via our select statement and
+		done channel, which ensures that generator is preemptable even if it is blocked
+		attempting to write to intStream.
+
+		On the other end of the pipeline, the final stage is ensured preemptability by induc‐ tion.
+		It is preemptable because the channel we’re ranging over will be closed when
+		preempted, and therefore our range will break when this occurs. The final stage is
+		preemptable because the stream we rely on is preemptable.
+
+		In between the beginning of the pipeline and the end of the pipeline, the code is
+		always ranging over a channel and sending on another channel within a select statement containing a done channel.
+
+		If a stage is blocked on retrieving a value from the incoming channel, it will become
+		unblocked when that channel is closed. We know by induction that the channel will
+		be closed because it is either a stage written like the stage we are within, or the begin‐
+		ning of the pipeline that we have established is preemptable. If a stage is blocked on
+		sending a value, it is preemptable thanks to the select statement.
+		Thus, our entire pipeline is always preemptable by closing the done channel.
+	*/
+}
+
+/* Some handy generators
+
+a generator for a pipeline is any function that converts a set of discrete values into a stream of values on a channel.
+
+*/
+
+func runrepeat() {
+
+	// repeat the values you pass to it infinitely until you tell it to stop
+	repeat := func(
+		done <-chan any,
+		values ...any,
+	) <-chan any {
+		valueStream := make(chan any)
+		go func() {
+			defer close(valueStream)
+			for {
+				for _, v := range values {
+					select {
+					case <-done:
+						return
+					case valueStream <- v:
+					}
+				}
+			}
+		}()
+		return valueStream
+	}
+
+	// This pipeline stage will only take the first num items off of its incoming valueStream and then exit
+	take := func(
+		done <-chan any,
+		valueStream <-chan any,
+		num int,
+	) <-chan any {
+		takeStream := make(chan any)
+		go func() {
+			defer close(takeStream)
+			for range num {
+				select {
+				case <-done:
+					return
+				case takeStream <- <-valueStream:
+				}
+			}
+		}()
+		return takeStream
+	}
+
+	// use them together
+	done := make(chan any)
+	defer close(done)
+	for num := range take(done, repeat(done, 1), 10) {
+		fmt.Printf("%v ", num)
+	}
+}
+
+func runrepeatfunc() {
+	// let’s create another repeating generator, but this time, let’s create one that repeatedly calls a function
+	repeatFn := func(
+		done <-chan any,
+		fn func() any,
+	) <-chan any {
+		valueStream := make(chan any)
+		go func() {
+			defer close(valueStream)
+			for {
+				select {
+				case <-done:
+					return
+				case valueStream <- fn():
+				}
+			}
+		}()
+		return valueStream
+	}
+
+	// This pipeline stage will only take the first num items off of its incoming valueStream and then exit
+	take := func(
+		done <-chan any,
+		valueStream <-chan any,
+		num int,
+	) <-chan any {
+		takeStream := make(chan any)
+		go func() {
+			defer close(takeStream)
+			for range num {
+				select {
+				case <-done:
+					return
+				case takeStream <- <-valueStream:
+				}
+			}
+		}()
+		return takeStream
+	}
+
+	done := make(chan any)
+	defer close(done)
+	// this rand function is the repeater
+	rand := func() any { return rand.Int() }
+	for num := range take(done, repeatFn(done, rand), 10) {
+		fmt.Println(num)
+	}
+
+}
+
+func runtypeassert() {
+
+	// repeat the values you pass to it infinitely until you tell it to stop
+	repeat := func(
+		done <-chan any,
+		values ...any,
+	) <-chan any {
+		valueStream := make(chan any)
+		go func() {
+			defer close(valueStream)
+			for {
+				for _, v := range values {
+					select {
+					case <-done:
+						return
+					case valueStream <- v:
+					}
+				}
+			}
+		}()
+		return valueStream
+	}
+
+	// This pipeline stage will only take the first num items off of its incoming valueStream and then exit
+	take := func(
+		done <-chan any,
+		valueStream <-chan any,
+		num int,
+	) <-chan any {
+		takeStream := make(chan any)
+		go func() {
+			defer close(takeStream)
+			for range num {
+				select {
+				case <-done:
+					return
+				case takeStream <- <-valueStream:
+				}
+			}
+		}()
+		return takeStream
+	}
+
+	// it is kinda better to use `any` for types in channel pipelines (but it's kinda taboo)
+	// here it's ok as we are concerned to get data into a stream, take some of it etc. types don't matter
+	// for type assertions, add another stage in the pipeline
+
+	toString := func(
+		done <-chan any,
+		valueStream <-chan any,
+	) <-chan string {
+		stringStream := make(chan string)
+		go func() {
+			defer close(stringStream)
+			for v := range valueStream {
+				select {
+				case <-done:
+					return
+				case stringStream <- v.(string):
+				}
+			}
+		}()
+		return stringStream
+	}
+
+	done := make(chan any)
+	defer close(done)
+	var message strings.Builder
+	for token := range toString(done, take(done, repeat(done, "I", "am."), 5)) {
+		message.WriteString(token)
+	}
+	fmt.Printf("message: %s...", message.String())
+}
+
+/* Fan-In, Fan-Out
+
+Fan-out is a term to describe the process of starting multiple goroutines to handle input from the pipeline
+Fan-in is a term to describe the process of combining multiple results into one channel
+(multiplexing or joining together multiple streams of data into a single stream)
+
+used when some stages of a pipeline are computationally expensive. So you get multiple goroutines processing the same chunk of data
+
+*/
+
+/*
+We’re generating a stream of random numbers, capped at 50,000,000, converting the
+stream into an integer stream, and then passing that into our primeFinder stage. pri
+meFinder naively begins to attempt to divide the number provided on the input
+stream by every number below it. If it’s unsuccessful, it passes the value on to the next
+stage. Certainly, this is a horrible way to try and find prime numbers, but it fulfills our
+requirement of taking a long time
+
+func runprimeslow() {
+	rand := func() interface{} { return rand.IntN(50000000) }
+	done := make(chan interface{})
+	defer close(done)
+	start := time.Now()
+	randIntStream := toInt(done, repeatFn(done, rand))
+	fmt.Println("Primes:")
+	for prime := range take(done, primeFinder(done, randIntStream), 10) {
+		fmt.Printf("\t%d\n", prime)
+	}
+	fmt.Printf("Search took: %v", time.Since(start))
+}
+
+
+we only have two stages: random number generation and prime sieving. In a larger program, your pipeline might be composed of
+many more stages; how do we know which one to fan out? Remember our criteria
+from earlier: order-independence and duration. Our random integer generator is certainly order-independent,
+but it doesn’t take a particularly long time to run. The primeFinder stage is also order-independent—numbers are either prime or not—and
+because of our naive algorithm, it certainly takes a long time to run. It looks like a good candidate for fanning out
+
+
+func runprimesfanout() {
+	primeStream := primeFinder(done, randIntStream)
+	numFinders := runtime.NumCPU()
+	finders := make([]<-chan int, numFinders)
+	for i := range numFinders {
+		finders[i] = primeFinder(done, randIntStream)
+	}
+}
+
+Now for fan in:
+
+*/
+
+func runfanin() {
+	fanIn := func(
+		done <-chan any,
+		channels ...<-chan any,
+	) <-chan any {
+		var wg sync.WaitGroup
+		multiplexedStream := make(chan any)
+		// when passed a channel, will read from the channel, and pass the value read onto the multiplexedStream channel
+		multiplex := func(c <-chan any) {
+			defer wg.Done()
+			for i := range c {
+				select {
+				case <-done:
+					return
+				case multiplexedStream <- i:
+				}
+			}
+		}
+		// Select from all the channels
+		wg.Add(len(channels))
+		for _, c := range channels {
+			go multiplex(c)
+		}
+		// Wait for all the reads to complete
+		go func() {
+			wg.Wait()
+			close(multiplexedStream)
+		}()
+		return multiplexedStream
+	}
+	fanIn(make(chan any))
+
+	/*
+		fanning in involves creating the multiplexed channel consumers will
+		read from, and then spinning up one goroutine for each incoming channel, and one
+		goroutine to close the multiplexed channel when the incoming channels have all been
+		closed. Since we’re going to be creating a goroutine that is waiting on N other gorou‐
+		tines to complete, it makes sense to create a sync.WaitGroup to coordinate things.
+		The multiplex function also notifies the WaitGroup that it’s done.
+	*/
+
+}
+
+/* complete prime fan-in/fan-out
+
+func runfancomp() {
+	done := make(chan interface{})
+	defer close(done)
+
+	start := time.Now()
+	rand := func() interface{} { return rand.Intn(50000000) }
+	randIntStream := toInt(done, repeatFn(done, rand))
+	numFinders := runtime.NumCPU()
+
+	fmt.Printf("Spinning up %d prime finders.\n", numFinders)
+
+	finders := make([]<-chan interface{}, numFinders)
+
+	fmt.Println("Primes:")
+	for i := 0; i < numFinders; i++ {
+		finders[i] = primeFinder(done, randIntStream)
+	}
+
+	for prime := range take(done, fanIn(done, finders...), 10) {
+		fmt.Printf("\t%d\n", prime)
+	}
+
+	fmt.Printf("Search took: %v", time.Since(start))
+}
+*/
+
+/* Or done
+
+you don’t know if the fact that your goroutine was canceled means the channel you’re
+reading from will have been canceled. For this reason, as we laid out in “Preventing
+Goroutine Leaks” on page 90, we need to wrap our read from the channel with a
+select statement that also selects from a done channel
+
+*/
 
 func Run() {
 	// runlexconf()
@@ -284,5 +993,12 @@ func Run() {
 	// rungoroutineLEAK()
 	// rungoroutineFIXED()
 	// runreadblocked()
-	runreadblockedFIXED()
+	// runreadblockedFIXED()
+	// runorchannel()
+	// runerrproblem()
+	// runpipeline()
+	// runpipelinechannels()
+	// runrepeat()
+	// runrepeatfunc()
+	runtypeassert()
 }
