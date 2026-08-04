@@ -9,6 +9,9 @@ import (
 	"time"
 )
 
+// following the book : Concurrency in Go (chap 4)
+
+
 /* Confinement
 
 When working with concurrent code, there are a few different options for safe operation. We’ve gone over two of them:
@@ -150,7 +153,6 @@ if you’ve begun a goroutine, it’s most likely cooperating with several other
 We could even represent this interconnectedness as a graph: whether or not a child goroutine should continue executing
 might be predicated on knowledge of the state of many other goroutines. The parent goroutine (often the main goroutine)
 with this full contextual knowledge should be able to tell its child goroutines to terminate.
-
 */
 
 func rungoroutineLEAK() {
@@ -223,10 +225,10 @@ func runreadblocked() {
 	newRandStream := func() <-chan int {
 		randStream := make(chan int)
 		go func() {
-			defer fmt.Println("newRandStream closure exited.")
-			defer close(randStream)
+			defer fmt.Println("newRandStream closure exited.") // these never runs because we never exit the loop
+			defer close(randStream)                            // goroutine blocks on write until the end of the program
 			for {
-				randStream <- rand.Int()
+				randStream <- rand.Int() // this blocks until someone wants to read
 			}
 		}()
 		return randStream
@@ -234,14 +236,53 @@ func runreadblocked() {
 
 	randStream := newRandStream()
 	fmt.Println("3 random ints:")
-	for i := 1; i <= 3; i++ {
+	for i := range 3 { // we read 3 times, get 3 values, then goroutine blocks until end of program
 		fmt.Printf("%d: %d\n", i, <-randStream)
 	}
 }
+
+// We have no way of telling the producer it can stop. The solution is to provide the producer goroutine with a channel informing it to exit
+
+func runreadblockedFIXED() {
+
+	newRandStream := func(done <-chan any) <-chan int {
+		randStream := make(chan int)
+		go func() {
+			defer fmt.Println("newRandStream closure exited.")
+			defer close(randStream)
+			for {
+				select {
+				case randStream <- rand.Int():
+				case <-done:
+					return
+				}
+			}
+		}()
+		return randStream
+	}
+
+	done := make(chan any)
+	randStream := newRandStream(done)
+	fmt.Println("3 random ints:")
+	for i := range 3 {
+		fmt.Printf("%d: %d\n", i, <-randStream)
+	}
+	close(done)
+	// Simulate ongoing work
+	time.Sleep(1 * time.Second)
+}
+
+/*
+
+
+*/
+
 
 func Run() {
 	// runlexconf()
 	// runconfunsafe()
 	// rungoroutineLEAK()
-	rungoroutineFIXED()
+	// rungoroutineFIXED()
+	// runreadblocked()
+	runreadblockedFIXED()
 }

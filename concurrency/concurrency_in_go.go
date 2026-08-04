@@ -8,6 +8,9 @@ import (
 	"sync"
 )
 
+// following the book : Concurrency in Go (til chap 3)
+
+
 // we have successfully synchronized access to the memory
 func manualSync() {
 	var memoryAccess sync.Mutex
