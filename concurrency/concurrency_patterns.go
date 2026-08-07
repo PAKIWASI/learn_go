@@ -985,7 +985,56 @@ reading from will have been canceled. For this reason, as we laid out in “Prev
 Goroutine Leaks” on page 90, we need to wrap our read from the channel with a
 select statement that also selects from a done channel
 
+or val := range myChan {
+	// Do something with val
+}
+And explodes it out into this:
+loop:
+	for {
+		select {
+		case <-done:
+			break loop
+		case maybeVal, ok := <-myChan:
+			if ok == false {
+				return // or maybe break from for
+			}
+		// Do something with val
+	}
+}
+
+this get's pretty verbose. alternative:
 */
+
+func runordone() {
+	orDone := func(done, c <-chan any) <-chan any {
+		valStream := make(chan any)
+		go func() {
+			defer close(valStream)
+			for {
+				select {
+				case <-done:
+					return
+				case v, ok := <-c:
+					if !ok {
+						return
+					}
+					select {
+					case valStream <- v:
+					case <-done:
+					}
+				}
+			}
+		}()
+		return valStream
+	}
+
+	done := make(chan any)
+	myChan := make(chan any)
+
+	for val := range orDone(done, myChan) {
+		fmt.Println(val, myChan)
+	}
+}
 
 func Run() {
 	// runlexconf()
@@ -1000,5 +1049,7 @@ func Run() {
 	// runpipelinechannels()
 	// runrepeat()
 	// runrepeatfunc()
-	runtypeassert()
+	// runtypeassert()
+	// runordone()
+
 }
