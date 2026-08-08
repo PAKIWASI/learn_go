@@ -8,8 +8,8 @@ import (
 
 /* Rob Pike Google I/0 2012
 
-1. Goroutines are light weight threads that are managed by the go runtime
-2. The runtime multiplexes all goroutines onto os level threads. Everyone get's a turn on the cpu
+1. Goroutines are lightweight threads that are managed by the go runtime
+2. The runtime multiplexes all goroutines onto os level threads. Everyone gets a turn on the cpu
 3. When you launch a goroute with `go func()...`. It goes off into the background and the program continues from the next line
 4. So we have to mainly deal with syncronization issues and race conditions when working with goroutines
 5. Channels are used to send data to and from a goroutine. It's a type so `chan int` means "channel of int type". you use `make(chan ..)`
