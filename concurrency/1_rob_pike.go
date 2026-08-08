@@ -27,7 +27,7 @@ So channels do both: COMMUNICATION and SYNCRONIZATION in a single operation
 // eg 1
 func channelBlocking() {
 	ch := make(chan string) // unbuffered channel
-	go borin("hello", ch)   // lauch a function with the challen
+	go borin("hello", ch)   // lauch a function with the channel
 	for range 5 {
 		fmt.Println(<-ch) // each iteration blocks for a value to arrive into ch
 	}
@@ -104,7 +104,7 @@ func fanIn(a, b <-chan string) <-chan string {
 // pattern 3:
 // pattern 2 is cool but what if you want a garentee that both workers execute one after the other ie take turns
 
-// sending a channle on a channle, making a goroutine wait it's turn
+// sending a signal on a channel, making a goroutine wait it's turn
 // receive all messages, then enable them again by sending on a private channel
 // first we define a message type that contains a channel for the reply
 

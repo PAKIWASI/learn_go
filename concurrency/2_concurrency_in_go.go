@@ -88,8 +88,6 @@ type Button struct {
 }
 
 func runcond() {
-	// create a button
-	button := Button{Clicked: sync.NewCond(&sync.Mutex{})}
 
 	// a convenience function that will allow us to register functions to
 	// handle signals from a condition. Each handler is run on its own goroutine, and
@@ -106,6 +104,9 @@ func runcond() {
 		}()
 		goroutineRunning.Wait() // subscribe doesnot return until we are confirm that goroutine is running
 	}
+
+	// create a button
+	button := Button{Clicked: sync.NewCond(&sync.Mutex{})}
 
 	// set a handler for when the mouse button is raised. It in turn calls Broadcast on the Clicked Cond to let all handlers
 	// know that the mouse button has been clicked
@@ -225,7 +226,6 @@ func runchannel() {
 	for integer := range intStream {
 		fmt.Printf("%v ", integer)
 	}
-
 }
 
 // channel ownership
