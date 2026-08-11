@@ -2,15 +2,15 @@
 package gameoflife
 
 import (
-	"bufio"
+	"os"
 	"fmt"
 	"log"
-	"math/rand/v2"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
+	"bufio"
+	"syscall"
+	"os/signal"
+	"math/rand/v2"
 
 	"golang.org/x/term"
 )
