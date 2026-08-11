@@ -7,6 +7,9 @@ import (
 	"log"
 	"math/rand/v2"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -20,9 +23,9 @@ const (
 )
 
 const (
-	latin  = "abcdefghijklmnopqrstuvwxyz1234567890"
-	digits = "1234567890"
 	binary = "01"
+	digits = "1234567890"
+	latin  = "abcdefghijklmnopqrstuvwxyz1234567890"
 )
 
 type Column struct {
@@ -31,8 +34,7 @@ type Column struct {
 	endIdx   uint16 // y-index where this stream ends (can be past the height so trail can finish)
 	// the difference b/w the startIdx and endIdx shouldn't be much bigger than the terminal height
 	len       uint16 // length of the rain stream, number of chars drawn for this column
-	fadeStart uint16 // y-index where fade starts
-	numFaded  uint16 // how many chars are to be faded
+	numFaded  uint16 // how many chars are to be faded (starting at startIdx)
 	cooldown  uint16 // how long to wait after finishing a stream to be considered for next stream
 	isActive  bool   // is this column currently "running"
 }
@@ -105,15 +107,103 @@ func (r *Rain) setCharset(set charset) {
 	}
 }
 
+func (r *Rain) initColumn() {
+	for {
+		colIdx := rand.N(r.width)
+		col := r.columns[colIdx]
+		if col.isActive {
+			continue
+		}
+
+		col.dropIdx = uint16(rand.N(len(r.charset)))
+		col.endIdx = rand.N(r.height) // TODO: don't allow small values
+		col.startIdx = rand.N(col.endIdx) // dont allow values very close to endIdx
+		col.len = 0
+		col.numFaded = rand.N(col.endIdx - col.startIdx)
+		col.cooldown = 0
+		col.isActive = true
+		break
+	}
+}
+
 func (r *Rain) init(set charset) {
 	r.setTermDims()
 	r.setCharset(set)
+	r.columns = make([]Column, r.width)
 	r.buffer = bufio.NewWriter(os.Stdout)
-	r.setupTerm()
+	r.setupTerm() // term cleanup defered in main
+
+	// init some lines
+	for range 5 {
+		r.initColumn()
+	}
+}
+
+func (r *Rain) handleInput(k byte) {
+	switch k {
+	case 'q':
+		r.done <- struct{}{}
+	}
+}
+
+func (r *Rain) update() {
+
+}
+
+func (r *Rain) draw() {
+
 }
 
 func RunRain() {
-	var rain Rain
-	rain.init(charsetLatin)
-	defer rain.cleanupTerm()
+	r := Rain{}
+	r.init(charsetLatin)
+	defer r.cleanupTerm()
+
+	// Catch SIGTERM (kill command)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		r.done <- struct{}{}
+	}()
+
+	// reading keyboard input as a seperate goroutine
+	keyCh := make(chan byte)
+	buf := make([]byte, 1)
+	go func() {
+		for {
+			n, err := os.Stdin.Read(buf)
+			if err != nil || n == 0 {
+				continue
+			}
+			select {
+			case <-r.done:
+				return
+			case keyCh <- buf[0]:
+			}
+		}
+	}()
+
+	// FPS stuff
+	const fps = 10
+	frameDuration := time.Second / time.Duration(fps)
+	ticker := time.NewTicker(frameDuration)
+	defer ticker.Stop()
+
+
+	// MAIN LOOP
+	for {
+		select {
+		case <-r.done:
+			close(r.done)
+			return
+		case k := <-keyCh:
+			r.handleInput(k)
+		case <-ticker.C:
+			if !r.isPaused {
+				r.update()
+				r.draw()
+			}
+		}
+	}
 }
