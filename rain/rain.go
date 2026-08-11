@@ -29,14 +29,22 @@ const (
 )
 
 type Column struct {
-	dropIdx  uint16 // which drop we are displaying this frame. Index into Rain.drops
+	charIdx  uint16 // which drop we are displaying this frame. Index into Rain.drops
 	startIdx uint16 // y-index for where the stream starts for this column
 	endIdx   uint16 // y-index where this stream ends (can be past the height so trail can finish)
 	// the difference b/w the startIdx and endIdx shouldn't be much bigger than the terminal height
-	len       uint16 // length of the rain stream, number of chars drawn for this column
-	numFaded  uint16 // how many chars are to be faded (starting at startIdx)
-	cooldown  uint16 // how long to wait after finishing a stream to be considered for next stream
-	isActive  bool   // is this column currently "running"
+	len      uint16 // length of the rain stream, number of chars drawn for this column
+	numFaded uint16 // how many chars are to be faded (starting at startIdx)
+	cooldown uint16 // how long to wait after finishing a stream to be considered for next stream
+	isActive bool   // is this column currently "running"
+}
+
+type Cursor struct {
+	x, y uint16
+}
+type Event struct {
+	move Cursor
+	char rune
 }
 
 type Rain struct {
@@ -48,6 +56,8 @@ type Rain struct {
 	columns []Column
 
 	buffer *bufio.Writer
+	writer chan Event
+
 	// saved terminal state to restore later
 	oldState *term.State
 
@@ -102,9 +112,7 @@ func (r *Rain) setCharset(set charset) {
 	}
 
 	r.charset = make([]rune, len(selected))
-	for i := range selected {
-		r.charset[i] = rune(selected[i])
-	}
+	r.charset = []rune(selected)
 }
 
 func (r *Rain) initColumn() {
@@ -115,8 +123,8 @@ func (r *Rain) initColumn() {
 			continue
 		}
 
-		col.dropIdx = uint16(rand.N(len(r.charset)))
-		col.endIdx = rand.N(r.height) // TODO: don't allow small values
+		col.charIdx = uint16(rand.N(len(r.charset)))
+		col.endIdx = rand.N(r.height)     // TODO: don't allow small values
 		col.startIdx = rand.N(col.endIdx) // dont allow values very close to endIdx
 		col.len = 0
 		col.numFaded = rand.N(col.endIdx - col.startIdx)
@@ -143,6 +151,8 @@ func (r *Rain) handleInput(k byte) {
 	switch k {
 	case 'q':
 		r.done <- struct{}{}
+	case 'p':
+		r.isPaused = true
 	}
 }
 
@@ -150,8 +160,13 @@ func (r *Rain) update() {
 
 }
 
+// TODO: maybe do an initial full draw like normal?
 func (r *Rain) draw() {
-
+	for i, c := range r.columns {
+		if c.isActive {
+			r.writer <- Event{move: Cursor{x: uint16(i), y: c.startIdx + c.len}, char: r.charset[c.charIdx]}
+		}
+	}
 }
 
 func RunRain() {
@@ -172,24 +187,20 @@ func RunRain() {
 	buf := make([]byte, 1)
 	go func() {
 		for {
+			// TODO: how to stop this goroutine when we are done
 			n, err := os.Stdin.Read(buf)
 			if err != nil || n == 0 {
 				continue
 			}
-			select {
-			case <-r.done:
-				return
-			case keyCh <- buf[0]:
-			}
+			keyCh <- buf[0]
 		}
 	}()
 
 	// FPS stuff
-	const fps = 10
+	const fps = 30
 	frameDuration := time.Second / time.Duration(fps)
 	ticker := time.NewTicker(frameDuration)
 	defer ticker.Stop()
-
 
 	// MAIN LOOP
 	for {
