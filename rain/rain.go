@@ -118,7 +118,7 @@ func (r *Rain) setCharset(set charset) {
 func (r *Rain) initColumn() {
 	for {
 		colIdx := rand.N(r.width)
-		col := r.columns[colIdx]
+		col := &r.columns[colIdx] // BUG: local copy
 		if col.isActive {
 			continue
 		}
@@ -161,6 +161,7 @@ func (r *Rain) update() {
 }
 
 // TODO: maybe do an initial full draw like normal?
+// we only write changes to stdout, not the full buffer. this runs as a seperate goroutine
 func (r *Rain) draw() {
 	for i, c := range r.columns {
 		if c.isActive {
