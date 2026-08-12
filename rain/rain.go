@@ -28,6 +28,15 @@ const (
 	latin  = "abcdefghijklmnopqrstuvwxyz1234567890"
 )
 
+type Screen = [][]rune
+type screenKind uint8
+
+const (
+	screenFront screenKind = iota
+	screenBack
+)
+
+
 type Column struct {
 	charIdx  uint16 // which drop we are displaying this frame. Index into Rain.drops
 	startIdx uint16 // y-index for where the stream starts for this column
@@ -57,6 +66,9 @@ type Rain struct {
 
 	buffer *bufio.Writer
 	writer chan Event
+
+	front Screen
+	back  Screen
 
 	// saved terminal state to restore later
 	oldState *term.State
@@ -118,7 +130,7 @@ func (r *Rain) setCharset(set charset) {
 func (r *Rain) initColumn() {
 	for {
 		colIdx := rand.N(r.width)
-		col := &r.columns[colIdx] // BUG: local copy
+		col := &r.columns[colIdx]
 		if col.isActive {
 			continue
 		}
@@ -137,9 +149,24 @@ func (r *Rain) initColumn() {
 func (r *Rain) init(set charset) {
 	r.setTermDims()
 	r.setCharset(set)
+	r.setupTerm() // term cleanup defered in main
 	r.columns = make([]Column, r.width)
 	r.buffer = bufio.NewWriter(os.Stdout)
-	r.setupTerm() // term cleanup defered in main
+	r.writer = make(chan Event)
+	r.done = make(chan struct{})
+
+	// 2D matrix backed by 1D array
+	buf1 := make([]rune, r.width*r.height)
+	buf2 := make([]rune, r.width*r.height)
+	r.front = make(Screen, r.height)
+	r.back = make(Screen, r.height)
+	for i := range r.front {
+		r.front[i] = buf1[uint16(i)*r.width : uint16(i+1)*r.width]
+		r.back[i] = buf2[uint16(i)*r.width : uint16(i+1)*r.width]
+	}
+
+	r.drawEmptyScreen(screenBack)
+	r.drawEmptyScreen(screenFront)
 
 	// init some lines
 	for range 5 {
@@ -158,14 +185,32 @@ func (r *Rain) handleInput(k byte) {
 
 func (r *Rain) update() {
 
+	for _, c := range r.columns {
+		if c.isActive && c.startIdx + c.len < c.endIdx {
+			
+		}
+	}
 }
 
-// TODO: maybe do an initial full draw like normal?
-// we only write changes to stdout, not the full buffer. this runs as a seperate goroutine
 func (r *Rain) draw() {
-	for i, c := range r.columns {
-		if c.isActive {
-			r.writer <- Event{move: Cursor{x: uint16(i), y: c.startIdx + c.len}, char: r.charset[c.charIdx]}
+
+}
+
+func (r *Rain) drawDiffed() {
+
+}
+
+func (r *Rain) drawEmptyScreen(s screenKind) {
+	var screen *Screen
+	switch s {
+	case screenBack:
+		screen = &r.back
+	case screenFront:
+		screen = &r.front
+	}
+	for i := range r.height {
+		for j := range r.width {
+			(*screen)[i][j] = ' '
 		}
 	}
 }
