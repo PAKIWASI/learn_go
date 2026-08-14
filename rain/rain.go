@@ -51,7 +51,7 @@ type Column struct {
 type Cursor struct {
 	x, y uint16
 }
-type Event struct {
+type MoveWriteEvent struct {
 	move Cursor
 	char rune
 }
@@ -65,7 +65,7 @@ type Rain struct {
 	columns []Column
 
 	buffer *bufio.Writer
-	writer chan Event
+	writer chan MoveWriteEvent
 
 	front Screen
 	back  Screen
@@ -152,7 +152,7 @@ func (r *Rain) init(set charset) {
 	r.setupTerm() // term cleanup defered in main
 	r.columns = make([]Column, r.width)
 	r.buffer = bufio.NewWriter(os.Stdout)
-	r.writer = make(chan Event)
+	r.writer = make(chan MoveWriteEvent)
 	r.done = make(chan struct{})
 
 	// 2D matrix backed by 1D array
