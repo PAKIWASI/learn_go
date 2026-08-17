@@ -21,8 +21,8 @@ and if you are receiving from a channel, you block until someone sends a value
 So channels do both: COMMUNICATION and SYNCRONIZATION in a single operation
 10. The syncronization part is true for unbuffered channels. Buffering removes syncronization. (will discuss later)
 
-
 */
+
 
 // eg 1
 func channelBlocking() {
