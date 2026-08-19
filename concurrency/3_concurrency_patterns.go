@@ -3,6 +3,7 @@ package concurrency
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
@@ -680,48 +681,48 @@ a generator for a pipeline is any function that converts a set of discrete value
 
 */
 
-func runrepeat() {
-
-	// repeat the values you pass to it infinitely until you tell it to stop
-	repeat := func(
-		done <-chan any,
-		values ...any,
-	) <-chan any {
-		valueStream := make(chan any)
-		go func() {
-			defer close(valueStream)
-			for {
-				for _, v := range values {
-					select {
-					case <-done:
-						return
-					case valueStream <- v:
-					}
-				}
-			}
-		}()
-		return valueStream
-	}
-
-	// This pipeline stage will only take the first num items off of its incoming valueStream and then exit
-	take := func(
-		done <-chan any,
-		valueStream <-chan any,
-		num int,
-	) <-chan any {
-		takeStream := make(chan any)
-		go func() {
-			defer close(takeStream)
-			for range num {
+// repeat the values you pass to it infinitely until you tell it to stop
+func repeat(
+	done <-chan any,
+	values ...any,
+) <-chan any {
+	valueStream := make(chan any)
+	go func() {
+		defer close(valueStream)
+		for {
+			for _, v := range values {
 				select {
 				case <-done:
 					return
-				case takeStream <- <-valueStream:
+				case valueStream <- v:
 				}
 			}
-		}()
-		return takeStream
-	}
+		}
+	}()
+	return valueStream
+}
+
+// This pipeline stage will only take the first num items off of its incoming valueStream and then exit
+func take(
+	done <-chan any,
+	valueStream <-chan any,
+	num int,
+) <-chan any {
+	takeStream := make(chan any)
+	go func() {
+		defer close(takeStream)
+		for range num {
+			select {
+			case <-done:
+				return
+			case takeStream <- <-valueStream:
+			}
+		}
+	}()
+	return takeStream
+}
+
+func runrepeat() {
 
 	// use them together
 	done := make(chan any)
@@ -751,26 +752,6 @@ func runrepeatfunc() {
 		return valueStream
 	}
 
-	// This pipeline stage will only take the first num items off of its incoming valueStream and then exit
-	take := func(
-		done <-chan any,
-		valueStream <-chan any,
-		num int,
-	) <-chan any {
-		takeStream := make(chan any)
-		go func() {
-			defer close(takeStream)
-			for range num {
-				select {
-				case <-done:
-					return
-				case takeStream <- <-valueStream:
-				}
-			}
-		}()
-		return takeStream
-	}
-
 	done := make(chan any)
 	defer close(done)
 	// this rand function is the repeater
@@ -782,47 +763,6 @@ func runrepeatfunc() {
 }
 
 func runtypeassert() {
-
-	// repeat the values you pass to it infinitely until you tell it to stop
-	repeat := func(
-		done <-chan any,
-		values ...any,
-	) <-chan any {
-		valueStream := make(chan any)
-		go func() {
-			defer close(valueStream)
-			for {
-				for _, v := range values {
-					select {
-					case <-done:
-						return
-					case valueStream <- v:
-					}
-				}
-			}
-		}()
-		return valueStream
-	}
-
-	// This pipeline stage will only take the first num items off of its incoming valueStream and then exit
-	take := func(
-		done <-chan any,
-		valueStream <-chan any,
-		num int,
-	) <-chan any {
-		takeStream := make(chan any)
-		go func() {
-			defer close(takeStream)
-			for range num {
-				select {
-				case <-done:
-					return
-				case takeStream <- <-valueStream:
-				}
-			}
-		}()
-		return takeStream
-	}
 
 	// it is kinda better to use `any` for types in channel pipelines (but it's kinda taboo)
 	// here it's ok as we are concerned to get data into a stream, take some of it etc. types don't matter
@@ -985,7 +925,7 @@ reading from will have been canceled. For this reason, as we laid out in “Prev
 Goroutine Leaks” on page 90, we need to wrap our read from the channel with a
 select statement that also selects from a done channel
 
-or val := range myChan {
+for val := range myChan {
 	// Do something with val
 }
 And explodes it out into this:
@@ -1005,36 +945,459 @@ loop:
 this get's pretty verbose. alternative:
 */
 
-func runordone() {
-	orDone := func(done, c <-chan any) <-chan any {
-		valStream := make(chan any)
-		go func() {
-			defer close(valStream)
-			for {
-				select {
-				case <-done:
+func orDone(done, c <-chan any) <-chan any {
+	valStream := make(chan any)
+	go func() {
+		defer close(valStream)
+		for {
+			select {
+			case <-done:
+				return
+			case v, ok := <-c:
+				if !ok {
 					return
-				case v, ok := <-c:
-					if !ok {
-						return
-					}
-					select {
-					case valStream <- v:
-					case <-done:
-					}
+				}
+				select {
+				case valStream <- v:
+				case <-done:
 				}
 			}
-		}()
-		return valStream
-	}
+		}
+	}()
+	return valStream
+}
+
+func runordone() {
 
 	done := make(chan any)
+	defer close(done)
 	myChan := make(chan any)
 
 	for val := range orDone(done, myChan) {
 		fmt.Println(val, myChan)
 	}
 }
+
+/* Tee Channel
+
+Sometimes you may want to split values coming in from a channel so that you can
+send them off into two separate areas of your codebase. Imagine a channel of user
+commands: you might want to take in a stream of user commands on a channel, send
+them to something that executes them, and also send them to something that logs the
+commands for later auditing.
+Taking its name from the `tee` command in Unix-like systems, the tee-channel does
+just this. You can pass it a channel to read from, and it will return two separate
+channels that will get the same value
+
+*/
+
+func runtee() {
+	tee := func(
+		done <-chan any,
+		in <-chan any,
+	) (<-chan any, <-chan any) {
+		out1 := make(chan any)
+		out2 := make(chan any)
+		go func() {
+			defer close(out1)
+			defer close(out2)
+			for val := range orDone(done, in) {
+				var out1, out2 = out1, out2 // shadowing
+				// one select statement so that writes to out1 and out2 don’t block each other.
+				// To ensure both are written to, we’ll perform two iterations of
+				// the select statement: one for each outbound channel.
+				for range 2 {
+					select {
+					case <-done:
+					case out1 <- val:
+						// Once we’ve written to a channel, we set its shadowed copy to nil so
+						// that further writes will block and the other channel may continue
+						out1 = nil
+					case out2 <- val:
+						out2 = nil
+					}
+				}
+			}
+		}()
+		return out1, out2
+	}
+
+	/*
+		writes to out1 and out2 are tightly coupled. The iteration over in cannot
+		continue until both out1 and out2 have been written to. Usually this is not a problem
+		as handling the throughput of the process reading from each channel should be a
+		concern of something other than the tee command anyway, but it’s worth noting
+	*/
+
+	done := make(chan any)
+	defer close(done)
+	out1, out2 := tee(done, take(done, repeat(done, 1, 2), 4))
+	for val1 := range out1 {
+		fmt.Printf("out1: %v, out2: %v\n", val1, <-out2)
+	}
+}
+
+/* Bridge Channel
+
+In some circumstances, you may find yourself wanting to consume values from a
+sequence of channels:
+
+	<-chan <-chan any
+
+As a consumer, the code may not care about the fact that its values come from a
+sequence of channels. In that case, dealing with a channel of channels can be cumber‐
+some. If we instead define a function that can destructure the channel of channels
+into a simple channel—a technique called bridging the channels—this will make it
+much easier for the consumer to focus on the problem at hand.
+
+*/
+
+func bridge(
+	done <-chan any,
+	chanStream <-chan <-chan any,
+) <-chan any {
+	valStream := make(chan any) // chan that returns all vals from bridge
+	go func() {
+		defer close(valStream)
+		// this loops pulls channels off of chanStream and provides
+		// then for use in the nested loop
+		for {
+			var stream <-chan any
+			select {
+			case maybeStream, ok := <-chanStream:
+				if !ok {
+					return
+				}
+				stream = maybeStream
+			case <-done:
+				return
+			}
+			// reads values off the channel it has been given and repeating those values onto valStream
+			// When the stream we’re currently looping over is closed, we break out of the loop
+			// performing the reads from this channel, and continue with the next iteration of the loop,
+			// selecting channels to read from. This provides us with an unbroken stream of values
+			for val := range orDone(done, stream) {
+				select {
+				case valStream <- val:
+				case <-done:
+				}
+			}
+		}
+	}()
+	return valStream
+}
+
+func runbridge() {
+	// creates a series of 10 channels, each with one element written to them,
+	// and passes these channels into the bridge function:
+	genVals := func() <-chan <-chan any {
+		chanStream := make(chan (<-chan any))
+		go func() {
+			defer close(chanStream)
+			for i := range 10 {
+				stream := make(chan any, 1)
+				stream <- i
+				close(stream)
+				chanStream <- stream
+			}
+		}()
+		return chanStream
+	}
+	for v := range bridge(nil, genVals()) {
+		fmt.Printf("%v ", v)
+	}
+}
+
+/*
+
+Sometimes it’s useful to begin accepting work for your pipeline even though the pipeline is not yet ready for more.
+This process is called queuing. Once your stage has completed some work, it stores it in a temporary location
+in memory so that other stages can retrieve it later, and your stage doesn’t need to hold a reference to it
+
+Adding queuing prematurely can hide synchronization issues such as deadlocks and livelocks, and further,
+as your program converges toward correctness, you may find that you need more or less queuing.
+
+*/
+
+/* The Context Package
+
+We’ve looked at the idiom of creating a done channel, which flows through your program and cancels all blocking concurrent operations.
+This works well, but it’s also somewhat limited. It would be useful if we could communicate extra information alongside the simple
+notification to cancel: why the cancellation was occuring, or whether or not our function has a deadline by which it needs to complete
+
+the context package serves two primary purposes:
+• To provide an API for canceling branches of your call-graph.
+• To provide a data-bag for transporting request-scoped data through your call-graph
+
+Let’s focus on the first aspect: cancellation. cancellation in a function has three aspects:
+• A goroutine’s parent may want to cancel it.
+• A goroutine may want to cancel its children.
+• Any blocking operations within a goroutine need to be preemptable so that it may be canceled.
+
+the Context type will be the first argument to your function.
+
+Context is immutable, how do we affect the behavior of cancellations in functions below a current function in the call stack?
+This is where the functions in the context package become important. Let’s take a look at a few of them one more time to refresh our memory:
+	func WithCancel(parent Context) (ctx Context, cancel CancelFunc)
+	func WithDeadline(parent Context, deadline time.Time) (Context, CancelFunc)
+	func WithTimeout(parent Context, timeout time.Duration) (Context, CancelFunc)
+Notice that all these functions take in a Context and return one as well. Some of these
+also take in other arguments like deadline and timeout. The functions all generate
+new instances of a Context with the options relative to these functions.
+
+WithCancel returns a new Context that closes its done channel when the returned cancel function is called.
+WithDeadline returns a new Context that closes its done channel when the machine’s clock advances past the given deadline.
+WithTimeout returns a new Context that closes its done channel after the given timeout duration.
+
+If your function needs to cancel functions BELOW IT IN THE CALL-GRAPH in some manner, it will call one of these functions
+and pass in the Context it was given, and then pass the Context returned into its children. If your function doesn’t need to modify the
+cancellation behavior, the function simply passes on the Context it was given. In this way, successive layers of
+the call-graph can create a Context that adheres to their needs without affecting their parents.
+This provides a very composable, elegant solution for how to manage branches of your call-graph.
+
+At the top of your asynchronous call-graph, your code probably won’t have been
+passed a Context. To start the chain, the context package provides you with two
+functions to create empty instances of Context:
+	func Background() Context
+Background simply returns an empty Context
+*/
+
+func runnoctx() {
+	var wg sync.WaitGroup
+	done := make(chan any)
+	defer close(done)
+	wg.Go(func() {
+		if err := printGreeting(done); err != nil {
+			fmt.Printf("%v", err)
+			return
+		}
+	})
+	wg.Go(func() {
+		if err := printFarewell(done); err != nil {
+			fmt.Printf("%v", err)
+			return
+		}
+	})
+	wg.Wait()
+}
+func printGreeting(done <-chan any) error {
+	greeting, err := genGreeting(done)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s world!\n", greeting)
+	return nil
+}
+func printFarewell(done <-chan any) error {
+	farewell, err := genFarewell(done)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s world!\n", farewell)
+	return nil
+}
+func genGreeting(done <-chan any) (string, error) {
+	switch locale, err := locale(done); {
+	case err != nil:
+		return "", err
+	case locale == "EN/US":
+		return "hello", nil
+	}
+	return "", fmt.Errorf("unsupported locale")
+}
+func genFarewell(done <-chan any) (string, error) {
+	switch locale, err := locale(done); {
+	case err != nil:
+		return "", err
+	case locale == "EN/US":
+		return "goodbye", nil
+	}
+	return "", fmt.Errorf("unsupported locale")
+}
+func locale(done <-chan any) (string, error) {
+	select {
+	case <-done:
+		return "", fmt.Errorf("canceled")
+	case <-time.After(1 * time.Minute):
+	}
+	return "EN/US", nil
+}
+
+/*
+
+we’ve set up the standard preemption method by creating a done channel and passing it down
+through our call-graph. If we close the done channel at any point in main, both branches will be canceled
+
+By introducing goroutines in main, we’ve opened up the possibility of controlling this program in a few different and interesting ways.
+Maybe we want genGreeting to time out if it takes too long. Maybe we don’t want genFarewell to invoke locale if we know its
+parent is going to be canceled soon. At each stack-frame, a function can affect the entirety of the call stack below it.
+Using the done channel pattern, we could accomplish this by wrapping the incoming done channel in other done channels and then returning
+if any of them fire, but we wouldn’t have the extra information about deadlines and errors a Context gives us.
+To make comparing the done channel pattern to the use of the context package easier, let’s represent this program as a tree.
+Each node in the tree represents an invocation of a function.
+
+Let’s say that genGreeting only wants to wait one second before abandoning the call
+to locale—a timeout of one second. We also want to build some smart logic into
+main. If printGreeting is unsuccessful, we also want to cancel our call to printFare
+well. After all, it wouldn’t make sense to say goodbye if we don’t say hello!
+
+*/
+
+func runctx() {
+	var wg sync.WaitGroup
+	// a new Context with context.Background() and wraps it with context.WithCancel to allow for cancellations.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wg.Go(func() {
+		if err := printGreeting2(ctx); err != nil {
+			fmt.Printf("cannot print greeting: %v\n", err)
+			// cancel context if any error
+			cancel()
+		}
+	})
+	wg.Go(func() {
+		if err := printFarewell2(ctx); err != nil {
+			fmt.Printf("cannot print farewell: %v\n", err)
+		}
+	})
+	wg.Wait()
+}
+func printGreeting2(ctx context.Context) error {
+	greeting, err := genGreeting2(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s world!\n", greeting)
+	return nil
+}
+func printFarewell2(ctx context.Context) error {
+	farewell, err := genFarewell2(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s world!\n", farewell)
+	return nil
+}
+func genGreeting2(ctx context.Context) (string, error) {
+	// wraps its Context with context.WithTimeout. This will automatically cancel the returned Context after 1 second,
+	// thereby canceling any children it passes the Context into, namely locale
+	ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
+	defer cancel()
+	switch locale, err := locale2(ctx); {
+	case err != nil:
+		return "", err
+	case locale == "EN/US":
+		return "hello", nil
+	}
+	return "", fmt.Errorf("unsupported locale")
+}
+func genFarewell2(ctx context.Context) (string, error) {
+	switch locale, err := locale2(ctx); {
+	case err != nil:
+		return "", err
+	case locale == "EN/US":
+		return "goodbye", nil
+	}
+	return "", fmt.Errorf("unsupported locale")
+}
+func locale2(ctx context.Context) (string, error) {
+	select {
+	case <-ctx.Done():
+		// returns the reason why the Context was canceled. This error will bubble all the way up to main,
+		// which will cause the cancellation at main
+		return "", ctx.Err()
+	case <-time.After(1 * time.Minute):
+	}
+	return "EN/US", nil
+}
+
+/*
+	Since we have a 1 min timer in locale2, the ctx wrapped in a 1 second timeout in gengreeting will always timeout and call
+	cancel(), which is received in <-ctx.Done() in locale2 so err is returned
+
+	gengreeting bubbles the error up, so does print greeting, and main calls it's context's cancel
+	for farewell, it does not make a new context, just passes the same one from main, which is then cancelled in main while farewell
+	is waiting in locale2 on the 1 min timer. so it's err msg says context cancelled
+*/
+
+/*
+	using the key-value store
+
+The only qualifications are that:
+• The key you use must satisfy Go’s notion of comparability; that is, the equality operators == and != need to return correct results when used.
+• Values returned must be safe to access from multiple goroutines.
+*/
+func runctxval() {
+	ProcessRequest("jane", "abc123")
+}
+func ProcessRequest(userID, authToken string) {
+	ctx := context.WithValue(context.Background(), "userID", userID)
+	ctx = context.WithValue(ctx, "authToken", authToken)
+	HandleResponse(ctx)
+}
+func HandleResponse(ctx context.Context) {
+	fmt.Printf(
+		"handling response for %v (%v)",
+		ctx.Value("userID"),
+		ctx.Value("authToken"),
+	)
+}
+
+/*
+Since both the Context’s key and value are defined as interface{}, we lose Go’s typesafety when attempting to retrieve values.
+The key could be a different type, or slightly different than the key we provide. The value could be a different type than
+we’re expecting. For these reasons, the Go authors recommend you follow a few rules when storing and retrieving value from a Context.
+First, they recommend you define a custom key-type in your package. As long as other packages do the same,
+this prevents collisions within the Context. why:
+*/
+
+func runkeytype() {
+	type foo int
+	type bar int
+	m := make(map[any]int)
+	m[foo(1)] = 1
+	m[bar(1)] = 2
+	fmt.Printf("%v", m)
+
+	/*
+		You can see that though the underlying values are the same, the different type information differentiates them within a map.
+		Since the type you define for your package’s keys is unexported, other packages cannot conflict with keys you generate within your package.
+		Since we don’t export the keys we use to store the data, we must therefore export functions that retrieve the data for us.
+		This works out nicely since it allows consumers of this data to use static, type-safe functions
+	*/
+}
+
+func runtypesafectx() {
+	ProcessRequest2("jane", "abc123")
+}
+
+type ctxKey int
+
+const (
+	ctxUserID ctxKey = iota
+	ctxAuthToken
+)
+
+func UserID(c context.Context) string {
+	return c.Value(ctxUserID).(string)
+}
+func AuthToken(c context.Context) string {
+	return c.Value(ctxAuthToken).(string)
+}
+func ProcessRequest2(userID, authToken string) {
+	ctx := context.WithValue(context.Background(), ctxUserID, userID)
+	ctx = context.WithValue(ctx, ctxAuthToken, authToken)
+	HandleResponse2(ctx)
+}
+func HandleResponse2(ctx context.Context) {
+	fmt.Printf(
+		"handling response for %v (auth: %v)",
+		UserID(ctx),
+		AuthToken(ctx),
+	)
+}
+
+
 
 func Run() {
 	// runlexconf()
@@ -1051,5 +1414,11 @@ func Run() {
 	// runrepeatfunc()
 	// runtypeassert()
 	// runordone()
-
+	// runtee()
+	// runbridge()
+	// runnoctx()
+	// runctx()
+	// runctxval()
+	// runkeytype()
+	runtypesafectx()
 }
