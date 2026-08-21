@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 )
 
-const minCap = 4
+const minCap = 10
 
 // circularArray is an immutable-after-publish ring buffer snapshot.
 // Once a *circularArray is stored into LFdeque.array, its contents at
@@ -57,7 +57,7 @@ func (a *circularArray[T]) resizeCopy(newCap int, from, to int64) *circularArray
 //
 //   - top and bottom are ever-increasing int64 counters
 //     indices into the backing array are always `counter % cap`.
-//   - The size is just `bottom - top`
+//   - The invarient is `top <= bottom `and the size is just `bottom - top`
 //   - Because they only ever increase, there is no ABA problem on the CAS
 //     below: a value top once held can never recur later.
 //   - The owner works the bottom end (LIFO: PushBottom/PopBottom).
@@ -129,17 +129,23 @@ func (d *LFdeque[T]) PopBottom() (v T, ok bool) {
 		return v, true
 	}
 
-	// size == 0: b == t. This is the last element.
+	// size == 0: b == t. There's now exactly one remaining logical element, and it sits at index t
+	// which is precisely the index a concurrent thief's Steal() is also trying to claim
+	// the arbitration has to happen on the same variable thieves arbitrate on: top.
+	// Steal() claims its slot via d.top.CompareAndSwap(t, t+1). So PopBottom, 
+	// to compete fairly for that same slot, has to attempt the exact same CAS.
 
 	// top records which elements the owner itself has already consumed from that end.
-	// Every code path that takes the last element has to advance it. Even though we
-	// don't have a race on the last element
+	// Every code path that takes the last element has to advance it
 	if !d.top.CompareAndSwap(t, t+1) {
 		v = *new(T)
 		ok = false
 	} else {
 		ok = true
 	}
+	// we already did d.bottom.Store(b) where b = t (the tentative decrement). So at this point, bottom == t.
+	// But top is now t+1, whether because the owner's own CAS just succeeded, or because a thief's CAS beat it there.
+	// Either way, the invariant top == bottom should hold at t+1.
 	d.bottom.Store(t + 1)
 	return v, ok
 }
@@ -174,8 +180,8 @@ func (d *LFdeque[T]) Steal() (v T, ok bool) {
 }
 
 // StealHalf steals half of the victim's deque. This is better for
-// a concurrent worker pool, thiefs won't just starve again after
-// stealing one value. Concurrent safe by CAS
+// a concurrent worker pool: thieves won't just starve again after
+// stealing one value. Concurrent-safe via CAS.
 func (d *LFdeque[T]) StealHalf() (v []T, ok bool) {
 	t := d.top.Load()
 	b := d.bottom.Load()
@@ -186,12 +192,14 @@ func (d *LFdeque[T]) StealHalf() (v []T, ok bool) {
 	}
 
 	a := d.array.Load()
-	v = a.buf[t : t+halfSize]
+	v = make([]T, halfSize)
+	for i := int64(0); i < halfSize; i++ {
+		v[i] = a.get(t + i) // get() gets the correct element by wrapping around
+	}
 
 	if !d.top.CompareAndSwap(t, t+halfSize) {
 		return nil, false
 	}
-
 	return v, true
 }
 
