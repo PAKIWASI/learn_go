@@ -15,9 +15,9 @@ import (
 	"sync/atomic"
 )
 
-const minCap = 16
+const minCap = 8
 
-// circularArray is an immutable-after-publish ring buffer snapshot.
+// circularArray is an no-push-after-publish ring buffer snapshot.
 // Once a *circularArray is stored into LFdeque.array, its contents at
 // any index a thief might read are never mutated again. A retired array is never modified again.
 // Only the owner writes into it, and only at the current "bottom" slot, before
@@ -138,7 +138,7 @@ func (d *LFdeque[T]) PopBottom() (v T, ok bool) {
 	// top records which elements the owner itself has already consumed from that end.
 	// Every code path that takes the last element has to advance it
 	if !d.top.CompareAndSwap(t, t+1) {
-		v = *new(T)
+		// v = *new(T)
 		ok = false
 	} else {
 		ok = true
@@ -182,25 +182,50 @@ func (d *LFdeque[T]) Steal() (v T, ok bool) {
 // StealHalf steals half of the victim's deque. This is better for
 // a concurrent worker pool: thieves won't just starve again after
 // stealing one value. Concurrent-safe via CAS.
+/* TODO:
+1. Load top and bottom.
+2. Calculate batch size.
+3. CAS top from t to t+n.
+4. Only after winning, copy [t, t+n).
+*/
+/*
+thief:
+    CAS top: 0 -> 5
+              |
+              v
+    owns [0,5)
+
+owner:
+    can only PopBottom()
+              |
+              v
+    cannot legitimately consume [0,5)
+
+the invarient: consumed = initial jobs + jobs added by owner
+*/
 func (d *LFdeque[T]) StealHalf() (v []T, ok bool) {
-	t := d.top.Load()
-	b := d.bottom.Load()
-	halfSize := (b - t) / 2
+    t := d.top.Load()
+    b := d.bottom.Load()
 
-	if halfSize <= 0 {
-		return nil, false
-	}
+    size := b - t
+    halfSize := size / 2
 
-	a := d.array.Load()
-	v = make([]T, halfSize)
-	for i := int64(0); i < halfSize; i++ {
-		v[i] = a.get(t + i) // get() gets the correct element by wrapping around
-	}
+    if halfSize <= 0 {
+        return nil, false
+    }
 
-	if !d.top.CompareAndSwap(t, t+halfSize) {
-		return nil, false
-	}
-	return v, true
+    if !d.top.CompareAndSwap(t, t+halfSize) {
+        return nil, false
+    }
+
+    a := d.array.Load()
+
+    v = make([]T, halfSize)
+    for i := int64(0); i < halfSize; i++ {
+        v[i] = a.get(t + i)
+    }
+
+    return v, true
 }
 
 // Len is an advisory size, safe to call from anywhere, but may be stale
