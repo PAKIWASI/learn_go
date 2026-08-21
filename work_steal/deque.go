@@ -64,7 +64,6 @@ func (a *circularArray[T]) resizeCopy(newCap int, from, to int64) *circularArray
 //   - Thieves work the top end (FIFO: Steal), racing each other, and resolved by CAS
 //   - Thieves only race for the owner's PopBottom for the very last element,
 //   - This race is resolved by a CAS by both the thief and the owner
-// TODO: can i use uints?
 type LFdeque[T any] struct {
 	top    atomic.Int64
 	bottom atomic.Int64
@@ -133,7 +132,7 @@ func (d *LFdeque[T]) PopBottom() (v T, ok bool) {
 	// size == 0: b == t. This is the last element.
 
 	// top records which elements the owner itself has already consumed from that end.
-	// Every code path that takes the last element has to advance it. Even though we 
+	// Every code path that takes the last element has to advance it. Even though we
 	// don't have a race on the last element
 	if !d.top.CompareAndSwap(t, t+1) {
 		v = *new(T)
@@ -171,6 +170,28 @@ func (d *LFdeque[T]) Steal() (v T, ok bool) {
 		var zero T
 		return zero, false
 	}
+	return v, true
+}
+
+// StealBig steals half of the victim's deque. This is better for
+// a concurrent worker pool, thiefs won't just starve again after
+// stealing one value. Concurrent safe by CAS
+func (d *LFdeque[T]) StealBig() (v []T, ok bool) {
+	t := d.top.Load()
+	b := d.bottom.Load()
+	halfSize := (b - t) / 2
+
+	if halfSize <= 0 {
+		return nil, false
+	}
+
+	a := d.array.Load()
+	v = a.buf[t : t+halfSize]
+
+	if !d.top.CompareAndSwap(t, t+halfSize) {
+		return nil, false
+	}
+
 	return v, true
 }
 
@@ -249,7 +270,7 @@ func Rundeque() {
 			}
 			atomic.AddInt64(&owned, 1)
 			c++
-			if c % 10 == 0 {
+			if c%10 == 0 {
 				d.PushBottom(zero)
 			}
 		}
@@ -259,5 +280,3 @@ func Rundeque() {
 	fmt.Printf("owner popped=%d, thieves stole=%d, total=%d\n",
 		owned, stolen, owned+stolen)
 }
-
-

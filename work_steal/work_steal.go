@@ -5,10 +5,10 @@
 // deque and steal work from the top of other workers' deques when they run out of local work.
 package worksteal
 
-// TODO:
+// TODO: later
 //   - Steal work in batches instead of one job at a time.
-//   - Use randomized victim selection.
 //   - Add a per-worker next-job slot for newly spawned work.
+//   - Use randomized victim selection. (add NOW)
 //   - Batch submissions into worker deques.
 //   - Add per-worker scheduling state for tracking idle/running workers.
 
@@ -34,13 +34,6 @@ type WorkerPool[T any] struct {
 	workers []*Worker[T]
 	execute func(T)
 }
-
-
-
-
-
-
-
 
 func Runworksteal() {
 
