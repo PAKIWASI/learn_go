@@ -11,7 +11,6 @@ package worksteal
 
 import (
 	"fmt"
-	"sync"
 	"sync/atomic"
 )
 
@@ -175,32 +174,47 @@ func (d *LFdeque[T]) Steal() (v T, ok bool) {
 	return v, true
 }
 
-// StealHalf steals half of the victim's deque. This is better for
-// a concurrent worker pool: thieves won't just starve again after
-// stealing one value. Concurrent-safe via CAS.
-func (d *LFdeque[T]) StealHalf() (v []T, read int64, ok bool) {
+// StealHalf removes approximately half of the victim's current work from
+// the top and returns it as a batch.
+//
+// The operation is thief-safe: any number of thieves may call StealHalf
+// concurrently, and it may also race with the owner's PushBottom/PopBottom.
+//
+// The thief first snapshots top and bottom to determine the logical size.
+// It then atomically advances top by half using a single CAS. This CAS is
+// the linearization point of the operation: once it succeeds, the range
+// [t, t+half) belongs exclusively to this thief.
+//
+// The array is loaded before the CAS so the thief retains a reference to
+// the array containing the claimed elements. If the owner resizes the deque
+// after the claim, the old array remains alive through this reference and
+// is never modified after publication, so reading the claimed range remains
+// safe.
+func (d *LFdeque[T]) StealHalf() (v []T, ok bool) {
 	t := d.top.Load()
 	b := d.bottom.Load()
+	half := (b - t) / 2
 
-	halfSize := (b - t) / 2
-	if halfSize <= 0 {
-		return nil, 0, false
+	if half < 1 {
+		return nil, false
 	}
 
 	a := d.array.Load()
-	buf := make([]T, halfSize)
 
-	for i := int64(0); i < halfSize; i++ {
-		val := a.get(t + i)                       // read BEFORE claiming
-		if !d.top.CompareAndSwap(t+i, t+i+1) {     // expected value advances with i
-			if i == 0 {
-				return nil, 0, false
-			}
-			return buf[:i], i, true
-		}
-		buf[i] = val
+	// Claim the entire batch atomically. This is the linearization point.
+	// If another thief advances top first, the CAS fails and none of this batch belongs to us.
+	if !d.top.CompareAndSwap(t, t+half) {
+		return nil, false
 	}
-	return buf, halfSize, true
+
+	// top has already been advanced, so these slots are now exclusively
+	// owned by this thief. Read them from the array snapshot we captured before the CAS.
+	buf := make([]T, half)
+	for i := int64(0); i < half; i++ {
+		buf[i] = a.get(t + i)
+	}
+
+	return buf, true
 }
 
 // Len is an advisory size, safe to call from anywhere, but may be stale
@@ -228,63 +242,3 @@ func (d *LFdeque[T]) Print() {
 	fmt.Println("]")
 }
 
-// Rundeque shows the intended usage pattern: one owner goroutine
-// pushing/popping its own end, several thief goroutines stealing
-// concurrently from the other end.
-func Rundeque() {
-	type A struct {
-		a int
-		b int
-	}
-	var zero A
-
-	d := NewLFdeque[A](8)
-
-	// Owner seeds the deque.
-	for range 5000 {
-		d.PushBottom(zero)
-	}
-
-	var stolen int64
-	var owned int64
-	var wg sync.WaitGroup
-
-	// Thieves.
-	for range 4 {
-		wg.Go(func() {
-			for {
-				_, read, ok := d.StealHalf()
-				if !ok {
-					if read <= 0 {
-						return
-					}
-					continue // lost a race, try again
-				}
-				atomic.AddInt64(&stolen, read) // count what you actually got back
-			}
-		})
-	}
-
-	// Owner keeps popping its own end concurrently with the thieves.
-	wg.Go(func() {
-		c := 0
-		for {
-			_, ok := d.PopBottom()
-			if !ok {
-				if d.Len() <= 0 {
-					return
-				}
-				continue
-			}
-			atomic.AddInt64(&owned, 1)
-			c++
-			if c%10 == 0 {
-				d.PushBottom(zero)
-			}
-		}
-	})
-
-	wg.Wait()
-	fmt.Printf("owner popped=%d, thieves stole=%d, total=%d\n",
-		owned, stolen, owned+stolen)
-}
