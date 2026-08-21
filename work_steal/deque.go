@@ -19,8 +19,8 @@ const minCap = 4
 
 // circularArray is an immutable-after-publish ring buffer snapshot.
 // Once a *circularArray is stored into LFdeque.array, its contents at
-// any index a thief might read are never mutated again. Only the
-// owner writes into it, and only at the current "bottom" slot, before
+// any index a thief might read are never mutated again. A retired array is never modified again.
+// Only the owner writes into it, and only at the current "bottom" slot, before
 // bottom is published. This is what makes it safe for a thief to keep
 // reading from an old array even after the owner has grown/shrunk and
 // swapped in a new one: the thief is holding a Go reference to the old
@@ -61,10 +61,9 @@ func (a *circularArray[T]) resizeCopy(newCap int, from, to int64) *circularArray
 //   - Because they only ever increase, there is no ABA problem on the CAS
 //     below: a value top once held can never recur later.
 //   - The owner works the bottom end (LIFO: PushBottom/PopBottom).
-//   - Thieves work the top end (FIFO: Steal), racing each other.
-//   - Thieves would only race for the owner's PopBottom for the very last element,
-//     We solve this by disallowing steals when only one element remains
-//
+//   - Thieves work the top end (FIFO: Steal), racing each other, and resolved by CAS
+//   - Thieves only race for the owner's PopBottom for the very last element,
+//   - This race is resolved by a CAS by both the thief and the owner
 // TODO: can i use uints?
 type LFdeque[T any] struct {
 	top    atomic.Int64
@@ -153,10 +152,7 @@ func (d *LFdeque[T]) Steal() (v T, ok bool) {
 	t := d.top.Load()
 	b := d.bottom.Load()
 
-	// can't steal if we have 1 value or less remaining
-	// this avoids the race on the last element, when one element remains and
-	// and a thief calls steal and the owner calls PopBottom
-	if b-t <= 1 {
+	if b-t <= 0 {
 		var zero T
 		return zero, false
 	}
@@ -170,6 +166,7 @@ func (d *LFdeque[T]) Steal() (v T, ok bool) {
 
 	// if the top val incremented after we did the `t := d.top.Load()`, then
 	// the value `v` at index `t` that we just got is already taken by another thief
+	// or the owner's cas won it
 	if !d.top.CompareAndSwap(t, t+1) {
 		var zero T
 		return zero, false
@@ -262,3 +259,5 @@ func Rundeque() {
 	fmt.Printf("owner popped=%d, thieves stole=%d, total=%d\n",
 		owned, stolen, owned+stolen)
 }
+
+
