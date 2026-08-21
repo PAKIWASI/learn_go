@@ -73,7 +73,7 @@ type LFdeque[T any] struct {
 }
 
 func NewLFdeque[T any](capacity int) *LFdeque[T] {
-	d := &LFdeque[T]{} // TODO: top and bottom inited as 0?
+	d := &LFdeque[T]{}
 	d.array.Store(newCircularArray[T](capacity))
 	return d
 }
@@ -156,7 +156,6 @@ func (d *LFdeque[T]) Steal() (v T, ok bool) {
 	// can't steal if we have 1 value or less remaining
 	// this avoids the race on the last element, when one element remains and
 	// and a thief calls steal and the owner calls PopBottom
-	// TODO: is this right?
 	if b-t <= 1 {
 		var zero T
 		return zero, false
@@ -169,8 +168,9 @@ func (d *LFdeque[T]) Steal() (v T, ok bool) {
 	// and the a.get(). If steal is invalid, you just discard the value
 	v = a.get(t)
 
+	// if the top val incremented after we did the `t := d.top.Load()`, then
+	// the value `v` at index `t` that we just got is already taken by another thief
 	if !d.top.CompareAndSwap(t, t+1) {
-		// Lost the race — either another thief already took index t.
 		var zero T
 		return zero, false
 	}
@@ -215,7 +215,7 @@ func Rundeque() {
 	d := NewLFdeque[A](8)
 
 	// Owner seeds the deque.
-	for i := 1; i <= 20; i++ {
+	for range 5000 {
 		d.PushBottom(zero)
 	}
 
@@ -241,6 +241,7 @@ func Rundeque() {
 
 	// Owner keeps popping its own end concurrently with the thieves.
 	wg.Go(func() {
+		c := 0
 		for {
 			_, ok := d.PopBottom()
 			if !ok {
@@ -250,6 +251,10 @@ func Rundeque() {
 				continue
 			}
 			atomic.AddInt64(&owned, 1)
+			c++
+			if c % 10 == 0 {
+				d.PushBottom(zero)
+			}
 		}
 	})
 
