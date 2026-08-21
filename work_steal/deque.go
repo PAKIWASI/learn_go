@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 )
 
-const minCap = 10
+const minCap = 16
 
 // circularArray is an immutable-after-publish ring buffer snapshot.
 // Once a *circularArray is stored into LFdeque.array, its contents at
@@ -253,16 +253,14 @@ func Rundeque() {
 	for range 4 {
 		wg.Go(func() {
 			for {
-				t := d.top.Load()
-				b := d.bottom.Load()
-				_, ok := d.StealHalf()
+				v, ok := d.StealHalf()
 				if !ok {
 					if d.Len() <= 0 {
 						return
 					}
 					continue // lost a race, try again
 				}
-				atomic.AddInt64(&stolen, b - t)
+            	atomic.AddInt64(&stolen, int64(len(v)))  // count what you actually got back
 			}
 		})
 	}
