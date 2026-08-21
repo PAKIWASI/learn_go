@@ -1,13 +1,13 @@
-// Package worksteal implements a lock-free, growable, array-based
-// work-stealing deque, following the Chase-Lev algorithm as refined by
-// Lê, Pop, Cohen & Nardelli ("Correct and Efficient Work-Stealing for
-// Weak Memory Models", PPoPP 2013).
+package worksteal
+
+// deque.go
+// A lock-free, growable, array-based work-stealing deque, following the Chase-Lev algorithm as refined by
+// Lê, Pop, Cohen & Nardelli ("Correct and Efficient Work-Stealing for Weak Memory Models", PPoPP 2013).
 //
 // Contract
 //   - Exactly ONE goroutine — the "owner" — may call PushBottom / PopBottom.
 //   - Any number of other goroutines — "thieves" — may call Steal concurrently,
 //     from any number of goroutines, at any time.
-package worksteal
 
 import (
 	"fmt"
@@ -19,7 +19,7 @@ const minCap = 4
 
 // circularArray is an immutable-after-publish ring buffer snapshot.
 // Once a *circularArray is stored into LFdeque.array, its contents at
-// any index a thief might read are never mutated again — only the
+// any index a thief might read are never mutated again. Only the
 // owner writes into it, and only at the current "bottom" slot, before
 // bottom is published. This is what makes it safe for a thief to keep
 // reading from an old array even after the owner has grown/shrunk and
@@ -43,7 +43,7 @@ func (a *circularArray[T]) get(i int64) T { return a.buf[i%a.cap()] }
 func (a *circularArray[T]) put(i int64, v T) { a.buf[i%a.cap()] = v }
 
 // resizeCopy builds a new array of newCap, containing the same logical
-// values as a for indices [from, to). Owner-only; called before the
+// values as a for indices [from, to). Owner-only: called before the
 // new array is published via LFdeque.array.Store.
 func (a *circularArray[T]) resizeCopy(newCap int, from, to int64) *circularArray[T] {
 	na := newCircularArray[T](newCap)
@@ -55,15 +55,17 @@ func (a *circularArray[T]) resizeCopy(newCap int, from, to int64) *circularArray
 
 // LFdeque is a lock-free double-ended queue.
 //
-//   - top and bottom are ever-increasing int64 counters, not raw slice
-//     indices — indices into the backing array are always (counter mod cap).
-//     Because they only ever increase, there is no ABA problem on the CAS
+//   - top and bottom are ever-increasing int64 counters
+//     indices into the backing array are always `counter % cap`.
+//   - The size is just `bottom - top`
+//   - Because they only ever increase, there is no ABA problem on the CAS
 //     below: a value top once held can never recur later.
 //   - The owner works the bottom end (LIFO: PushBottom/PopBottom).
-//   - Thieves work the top end (FIFO: Steal), racing each other and racing
-//     the owner's PopBottom for the very last element via CompareAndSwap
-//     on top. Exactly one winner ever succeeds; everyone else sees the CAS
-//     fail and retries or reports "nothing to steal".
+//   - Thieves work the top end (FIFO: Steal), racing each other.
+//   - Thieves would only race for the owner's PopBottom for the very last element,
+//     We solve this by disallowing steals when only one element remains
+//
+// TODO: can i use uints?
 type LFdeque[T any] struct {
 	top    atomic.Int64
 	bottom atomic.Int64
@@ -71,7 +73,7 @@ type LFdeque[T any] struct {
 }
 
 func NewLFdeque[T any](capacity int) *LFdeque[T] {
-	d := &LFdeque[T]{}
+	d := &LFdeque[T]{} // TODO: top and bottom inited as 0?
 	d.array.Store(newCircularArray[T](capacity))
 	return d
 }
@@ -84,7 +86,7 @@ func (d *LFdeque[T]) PushBottom(v T) {
 
 	if b-t >= a.cap() {
 		// Full: grow before writing. Only the owner ever installs a new
-		// array, so this Store races with nothing.
+		// array, so this Store does not race
 		a = a.resizeCopy(int(a.cap())*2, t, b)
 		d.array.Store(a)
 	}
@@ -106,9 +108,8 @@ func (d *LFdeque[T]) PopBottom() (v T, ok bool) {
 	b--
 	// Tentatively claim one fewer element. This immediately makes the
 	// deque "look" one shorter to any thief that loads bottom after this
-	// point — that's intentional: it's how the owner avoids a thief
-	// racing it for an element the owner has already decided to take,
-	// UNLESS it's the very last element, handled below.
+	// point. It's how the owner avoids a thief racing it for an element the owner
+	// has already decided to take, UNLESS it's the very last element, handled below.
 	d.bottom.Store(b)
 
 	t := d.top.Load()
@@ -124,23 +125,23 @@ func (d *LFdeque[T]) PopBottom() (v T, ok bool) {
 	v = a.get(b)
 
 	if size > 0 {
-		// Still at least one element left even after our decrement, so
+		// Still at least one element left even AFTER our decrement, so
 		// no thief could possibly be racing us for THIS slot (a thief
 		// only ever targets index top, and top < our slot here).
 		return v, true
 	}
 
-	// size == 0: b == t. This is the last element, and a thief's Steal
-	// could be trying to take this exact slot right now via CAS(top, t, t+1).
-	// Only one of "us" and "them" may win.
+	// size == 0: b == t. This is the last element.
+
+	// top records which elements the owner itself has already consumed from that end.
+	// Every code path that takes the last element has to advance it. Even though we 
+	// don't have a race on the last element
 	if !d.top.CompareAndSwap(t, t+1) {
-		// A thief beat us to it.
 		v = *new(T)
 		ok = false
 	} else {
 		ok = true
 	}
-	// Either way the deque is now empty; normalize bottom to match top.
 	d.bottom.Store(t + 1)
 	return v, ok
 }
@@ -152,17 +153,24 @@ func (d *LFdeque[T]) Steal() (v T, ok bool) {
 	t := d.top.Load()
 	b := d.bottom.Load()
 
-	if b-t <= 0 {
+	// can't steal if we have 1 value or less remaining
+	// this avoids the race on the last element, when one element remains and
+	// and a thief calls steal and the owner calls PopBottom
+	// TODO: is this right?
+	if b-t <= 1 {
 		var zero T
 		return zero, false
 	}
 
 	a := d.array.Load()
+	// get the value BEFORE seeing if it's a valid steal.
+	// so that if the steal is valid, you already have the value and
+	// you don't potentially get another value written betweeen your CAS
+	// and the a.get(). If steal is invalid, you just discard the value
 	v = a.get(t)
 
 	if !d.top.CompareAndSwap(t, t+1) {
-		// Lost the race — either another thief, or the owner's PopBottom,
-		// already took index t.
+		// Lost the race — either another thief already took index t.
 		var zero T
 		return zero, false
 	}
@@ -198,11 +206,17 @@ func (d *LFdeque[T]) Print() {
 // pushing/popping its own end, several thief goroutines stealing
 // concurrently from the other end.
 func Rundeque() {
-	d := NewLFdeque[int](8)
+	type A struct {
+		a int
+		b int
+	}
+	var zero A
+
+	d := NewLFdeque[A](8)
 
 	// Owner seeds the deque.
 	for i := 1; i <= 20; i++ {
-		d.PushBottom(i)
+		d.PushBottom(zero)
 	}
 
 	var stolen int64
@@ -243,5 +257,3 @@ func Rundeque() {
 	fmt.Printf("owner popped=%d, thieves stole=%d, total=%d\n",
 		owned, stolen, owned+stolen)
 }
-
-
