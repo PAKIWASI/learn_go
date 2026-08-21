@@ -132,20 +132,16 @@ func (d *LFdeque[T]) PopBottom() (v T, ok bool) {
 	// size == 0: b == t. There's now exactly one remaining logical element, and it sits at index t
 	// which is precisely the index a concurrent thief's Steal() is also trying to claim
 	// the arbitration has to happen on the same variable thieves arbitrate on: top.
-	// Steal() claims its slot via d.top.CompareAndSwap(t, t+1). So PopBottom, 
+	// Steal() claims its slot via d.top.CompareAndSwap(t, t+1). So PopBottom,
 	// to compete fairly for that same slot, has to attempt the exact same CAS.
-
-	// top records which elements the owner itself has already consumed from that end.
-	// Every code path that takes the last element has to advance it
 	if !d.top.CompareAndSwap(t, t+1) {
-		// v = *new(T)
 		ok = false
 	} else {
 		ok = true
 	}
 	// we already did d.bottom.Store(b) where b = t (the tentative decrement). So at this point, bottom == t.
 	// But top is now t+1, whether because the owner's own CAS just succeeded, or because a thief's CAS beat it there.
-	// Either way, the invariant top == bottom should hold at t+1.
+	// Either way, the invariant top <= bottom should hold at t+1.
 	d.bottom.Store(t + 1)
 	return v, ok
 }
@@ -182,50 +178,29 @@ func (d *LFdeque[T]) Steal() (v T, ok bool) {
 // StealHalf steals half of the victim's deque. This is better for
 // a concurrent worker pool: thieves won't just starve again after
 // stealing one value. Concurrent-safe via CAS.
-/* TODO:
-1. Load top and bottom.
-2. Calculate batch size.
-3. CAS top from t to t+n.
-4. Only after winning, copy [t, t+n).
-*/
-/*
-thief:
-    CAS top: 0 -> 5
-              |
-              v
-    owns [0,5)
+func (d *LFdeque[T]) StealHalf() (v []T, read int64, ok bool) {
+	t := d.top.Load()
+	b := d.bottom.Load()
 
-owner:
-    can only PopBottom()
-              |
-              v
-    cannot legitimately consume [0,5)
+	halfSize := (b - t) / 2
+	if halfSize <= 0 {
+		return nil, 0, false
+	}
 
-the invarient: consumed = initial jobs + jobs added by owner
-*/
-func (d *LFdeque[T]) StealHalf() (v []T, ok bool) {
-    t := d.top.Load()
-    b := d.bottom.Load()
+	a := d.array.Load()
+	buf := make([]T, halfSize)
 
-    size := b - t
-    halfSize := size / 2
-
-    if halfSize <= 0 {
-        return nil, false
-    }
-
-    if !d.top.CompareAndSwap(t, t+halfSize) {
-        return nil, false
-    }
-
-    a := d.array.Load()
-
-    v = make([]T, halfSize)
-    for i := int64(0); i < halfSize; i++ {
-        v[i] = a.get(t + i)
-    }
-
-    return v, true
+	for i := int64(0); i < halfSize; i++ {
+		val := a.get(t + i)                       // read BEFORE claiming
+		if !d.top.CompareAndSwap(t+i, t+i+1) {     // expected value advances with i
+			if i == 0 {
+				return nil, 0, false
+			}
+			return buf[:i], i, true
+		}
+		buf[i] = val
+	}
+	return buf, halfSize, true
 }
 
 // Len is an advisory size, safe to call from anywhere, but may be stale
@@ -278,14 +253,14 @@ func Rundeque() {
 	for range 4 {
 		wg.Go(func() {
 			for {
-				v, ok := d.StealHalf()
+				_, read, ok := d.StealHalf()
 				if !ok {
-					if d.Len() <= 0 {
+					if read <= 0 {
 						return
 					}
 					continue // lost a race, try again
 				}
-            	atomic.AddInt64(&stolen, int64(len(v)))  // count what you actually got back
+				atomic.AddInt64(&stolen, read) // count what you actually got back
 			}
 		})
 	}
@@ -313,5 +288,3 @@ func Rundeque() {
 	fmt.Printf("owner popped=%d, thieves stole=%d, total=%d\n",
 		owned, stolen, owned+stolen)
 }
-
-
