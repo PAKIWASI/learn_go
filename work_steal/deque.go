@@ -173,10 +173,10 @@ func (d *LFdeque[T]) Steal() (v T, ok bool) {
 	return v, true
 }
 
-// StealBig steals half of the victim's deque. This is better for
+// StealHalf steals half of the victim's deque. This is better for
 // a concurrent worker pool, thiefs won't just starve again after
 // stealing one value. Concurrent safe by CAS
-func (d *LFdeque[T]) StealBig() (v []T, ok bool) {
+func (d *LFdeque[T]) StealHalf() (v []T, ok bool) {
 	t := d.top.Load()
 	b := d.bottom.Load()
 	halfSize := (b - t) / 2
@@ -245,14 +245,16 @@ func Rundeque() {
 	for range 4 {
 		wg.Go(func() {
 			for {
-				_, ok := d.Steal()
+				t := d.top.Load()
+				b := d.bottom.Load()
+				_, ok := d.StealHalf()
 				if !ok {
 					if d.Len() <= 0 {
 						return
 					}
 					continue // lost a race, try again
 				}
-				atomic.AddInt64(&stolen, 1)
+				atomic.AddInt64(&stolen, b - t)
 			}
 		})
 	}
@@ -280,3 +282,5 @@ func Rundeque() {
 	fmt.Printf("owner popped=%d, thieves stole=%d, total=%d\n",
 		owned, stolen, owned+stolen)
 }
+
+
