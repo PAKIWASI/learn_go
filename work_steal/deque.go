@@ -5,8 +5,8 @@ package worksteal
 // Lê, Pop, Cohen & Nardelli ("Correct and Efficient Work-Stealing for Weak Memory Models", PPoPP 2013).
 //
 // Contract
-//   - Exactly ONE goroutine — the "owner" — may call PushBottom / PopBottom.
-//   - Any number of other goroutines — "thieves" — may call Steal concurrently,
+//   - Exactly ONE goroutine, the "owner", may call PushBottom / PopBottom.
+//   - Any number of other goroutines, "thieves", may call Steal concurrently,
 //     from any number of goroutines, at any time.
 
 import (
@@ -93,6 +93,25 @@ func (d *LFdeque[T]) PushBottom(v T) {
 	// observed as reordered before the a.put above by any goroutine that later Loads bottom.
 	a.put(b, v)
 	d.bottom.Store(b + 1)
+}
+
+func (d *LFdeque[T]) PushSliceBottom(v []T) {
+	sliceLen := int64(len(v))
+	b := d.bottom.Load()
+	t := d.top.Load()
+	a := d.array.Load()
+
+	if b-t+sliceLen >= a.cap() {
+		// grow with atleast enough size to house sliceLen
+		a = a.resizeCopy(int(a.cap()*2+sliceLen), t, b)
+		d.array.Store(a)
+	}
+	// first write all the values, while keeping the same `bottom` value
+	for i, val := range v {
+		a.put(b + int64(i), val)
+	}
+	// update the bottom value
+	d.bottom.Store(b + sliceLen)
 }
 
 // PopBottom removes and returns the value at the bottom (owner-only).
@@ -229,7 +248,7 @@ func (d *LFdeque[T]) Len() int64 {
 }
 
 // Print is for debugging only. It is NOT safe to call concurrently with
-// PushBottom/PopBottom/Steal from other goroutines — it takes an
+// PushBottom/PopBottom/Steal from other goroutines. It takes an
 // unsynchronized snapshot of top/bottom/array.
 func (d *LFdeque[T]) Print() {
 	t := d.top.Load()
