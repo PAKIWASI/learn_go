@@ -201,17 +201,6 @@ func (d *LFdeque[T]) Steal() (v T, ok bool) {
 //
 // The operation is thief-safe: any number of thieves may call StealHalf
 // concurrently, and it may also race with the owner's PushBottom/PopBottom.
-//
-// The thief first snapshots top and bottom to determine the logical size.
-// It then atomically advances top by half using a single CAS. This CAS is
-// the linearization point of the operation: once it succeeds, the range
-// [t, t+half) belongs exclusively to this thief.
-//
-// The array is loaded before the CAS so the thief retains a reference to
-// the array containing the claimed elements. If the owner resizes the deque
-// after the claim, the old array remains alive through this reference and
-// is never modified after publication, so reading the claimed range remains
-// safe.
 func (d *LFdeque[T]) StealHalf() (v []T, ok bool) {
 	t := d.top.Load()
 	b := d.bottom.Load()
@@ -221,19 +210,21 @@ func (d *LFdeque[T]) StealHalf() (v []T, ok bool) {
 		return nil, false
 	}
 
-	a := d.array.Load()
-
-	// Claim the entire batch atomically. This is the linearization point.
-	// If another thief advances top first, the CAS fails and none of this batch belongs to us.
-	if !d.top.CompareAndSwap(t, t+half) {
-		return nil, false
+	buf := make([]T, 0, half)
+	for i := int64(0); i < half; i++ {
+		val, stole := d.Steal()
+		if !stole {
+			// Either the deque emptied out from under us, or we lost a
+			// single-slot race to another thief/the owner. Either way,
+			// top has moved out from under our target sequence, so
+			// stop rather than trying to guess the next valid index.
+			break
+		}
+		buf = append(buf, val)
 	}
 
-	// top has already been advanced, so these slots are now exclusively
-	// owned by this thief. Read them from the array snapshot we captured before the CAS.
-	buf := make([]T, half)
-	for i := int64(0); i < half; i++ {
-		buf[i] = a.get(t + i)
+	if len(buf) == 0 {
+		return nil, false
 	}
 
 	return buf, true
@@ -263,4 +254,3 @@ func (d *LFdeque[T]) Print() {
 	}
 	fmt.Println("]")
 }
-

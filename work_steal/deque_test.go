@@ -482,6 +482,75 @@ func TestLFdeque_WorkloadRatios(t *testing.T) {
 
 
 
+// TestLFdeque_StealHalf_NoOverlapUnderOwnerContention is a regression test
+// for a bug in an earlier StealHalf implementation: it computed
+// half = (bottom-top)/2 from a non-atomic snapshot of top/bottom, then
+// tried to claim the whole range with a single CompareAndSwap on top
+// alone. That's unsound, because PopBottom's fast path (size > 0) commits
+// bottom decrements without ever touching top, so a thief that reads a
+// wide, slightly-stale gap and stalls before its CAS can have that CAS
+// succeed - top never moved - even though the owner has, in the
+// meantime, already popped and delivered several of the indices inside
+// the claimed range through the untouched fast path. Both sides then
+// deliver the same element.
+//
+// This races an aggressively draining owner against a single StealHalf
+// call, many times over varied interleavings, and fails if any value is
+// ever delivered to both sides.
+func TestLFdeque_StealHalf_NoOverlapUnderOwnerContention(t *testing.T) {
+	const (
+		trials = 500
+		n      = 200
+	)
+
+	for trial := 0; trial < trials; trial++ {
+		d := NewLFdeque[int](64)
+		for i := 0; i < n; i++ {
+			d.PushBottom(i)
+		}
+
+		seen := make([]atomic.Bool, n)
+		var dup atomic.Int64
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			vals, ok := d.StealHalf()
+			if !ok {
+				return
+			}
+			for _, v := range vals {
+				if seen[v].Swap(true) {
+					dup.Add(1)
+				}
+			}
+		}()
+
+		// Vary the interleaving a little across trials instead of
+		// always racing the same way.
+		if trial%3 == 0 {
+			runtime.Gosched()
+		}
+
+		for i := 0; i < n; i++ {
+			v, ok := d.PopBottom()
+			if !ok {
+				break
+			}
+			if seen[v].Swap(true) {
+				dup.Add(1)
+			}
+		}
+
+		wg.Wait()
+
+		if got := dup.Load(); got > 0 {
+			t.Fatalf("trial %d: %d value(s) delivered to both owner and thief", trial, got)
+		}
+	}
+}
+
 func TestLFdeque_PushSliceBottom(t *testing.T) {
 	tests := []struct {
 		name string // description of this test case
