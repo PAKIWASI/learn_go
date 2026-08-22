@@ -11,7 +11,6 @@ package worksteal
 
 import (
 	"context"
-	"fmt"
 	"math/rand/v2"
 	"sync/atomic"
 
@@ -218,69 +217,5 @@ func (p *WorkerPool[T, R]) StealHalf(thiefIdx int) (ok bool) {
 		}
 	}
 	return false
-}
-
-// chunkSize controls how far we split before testing individual numbers.
-// Splitting all the way down to size 1 would flood the deques with tiny
-// tasks; testing a batch per leaf amortizes the scheduling overhead.
-const chunkSize = 64
-
-// numRange is a half-open-ish inclusive range of ints to test for primality.
-type numRange struct{ lo, hi int } // inclusive on both ends
-
-func isPrime(n int) bool {
-	if n < 2 {
-		return false
-	}
-	for d := 2; d*d <= n; d++ {
-		if n%d == 0 {
-			return false
-		}
-	}
-	return true
-}
-
-// RunworkstealPrimes finds every prime in [2, limit] using the work-stealing
-// pool. Each leaf task independently discovers a different piece of
-// the answer (a batch of primes), and the only way to get the complete
-// set back is to read every value sent on the results channel.
-func Runworksteal() {
-	pool := NewWorkerPool[numRange, []int](context.Background(), 16, 8, 0,
-		func(ctx context.Context, r numRange, spawn func(numRange)) (*[]int, error) {
-			if r.hi-r.lo+1 > chunkSize {
-				mid := r.lo + (r.hi-r.lo)/2
-				spawn(numRange{r.lo, mid})
-				spawn(numRange{mid + 1, r.hi})
-				return nil, nil // this task itself found nothing directly
-			}
-
-			var found []int
-			for n := r.lo; n <= r.hi; n++ {
-				if isPrime(n) {
-					found = append(found, n)
-				}
-			}
-			if found == nil {
-				return nil, nil // avoid sending an empty slice as a "result"
-			}
-			return &found, nil
-		})
-
-	pool.Submit(numRange{2, 10000000})
-	resCh := pool.Run()
-
-	// Drain concurrently with Wait — results is unbuffered (resultBuffSize
-	// 0), so if we waited first, a worker blocked on `p.results <- *result`
-	// would deadlock against a Wait() that's blocked on that same worker exiting.
-	go func() {
-		for batch := range resCh {
-			fmt.Println(batch)
-		}
-	}()
-
-	err := pool.Wait()
-	if err != nil {
-		fmt.Println(err.Error())
-	}
 }
 
