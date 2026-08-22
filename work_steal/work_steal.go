@@ -26,9 +26,10 @@ type Worker[T any] struct {
 	deque *LFdeque[T]
 }
 
-func newWorker[T any](id int, capacity int) *Worker[T] {
-	return &Worker[T]{deque: NewLFdeque[T](capacity)}
+func newWorker[T any](id int, capacity int) Worker[T] {
+	return Worker[T]{deque: NewLFdeque[T](capacity)}
 }
+
 
 // WorkerPool manages a collection of workers and schedules work between them.
 //
@@ -36,8 +37,17 @@ func newWorker[T any](id int, capacity int) *Worker[T] {
 // deques. execute defines how a worker executes a T.
 type WorkerPool[T any] struct {
 	// the index of the worker is it's implicit id
-	workers []*Worker[T]
+	workers []Worker[T]
 	execute func(T)
+}
+
+func NewWorkerPool[T any](poolSize, initialWorkerCap int) *WorkerPool[T] {
+	workers := make([]Worker[T], poolSize)
+	for i := range poolSize {
+		workers[i] = newWorker[T](i, initialWorkerCap)
+	}
+	pool := WorkerPool[T]{}
+	return &pool
 }
 
 // steal attempts to steal work for the given worker from a randomly chosen
@@ -50,7 +60,7 @@ func (p *WorkerPool[T]) StealHalf(thiefIdx int) (ok bool) {
 		// victim twice and don't bias toward low-index workers.
 		start := rand.IntN(n)
 
-		for i := 0; i < n; i++ {
+		for i := range n {
 			idx := (start + i) % n
 			if idx == thiefIdx {
 				continue

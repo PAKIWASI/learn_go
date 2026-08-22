@@ -95,6 +95,9 @@ func (d *LFdeque[T]) PushBottom(v T) {
 	d.bottom.Store(b + 1)
 }
 
+// PushSliceBottom pushes all the elements of the slice `v` into
+// the owner's queue at bottom (LIFO). A thief calls this to store
+// the values it stole
 func (d *LFdeque[T]) PushSliceBottom(v []T) {
 	sliceLen := int64(len(v))
 	b := d.bottom.Load()
