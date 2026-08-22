@@ -239,7 +239,7 @@ func (d *LFdeque[T]) StealHalf() (v []T, ok bool) {
 	return buf, true
 }
 
-// Len is an advisory size, safe to call from anywhere, but may be stale
+// Len [DEBUG] is an advisory size, safe to call from anywhere, but may be stale
 // the instant it returns since top/bottom can move concurrently.
 func (d *LFdeque[T]) Len() int64 {
 	b := d.bottom.Load()
@@ -250,7 +250,7 @@ func (d *LFdeque[T]) Len() int64 {
 	return b - t
 }
 
-// Print is for debugging only. It is NOT safe to call concurrently with
+// Print [DEBUG] is for debugging only. It is NOT safe to call concurrently with
 // PushBottom/PopBottom/Steal from other goroutines. It takes an
 // unsynchronized snapshot of top/bottom/array.
 func (d *LFdeque[T]) Print() {

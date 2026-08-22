@@ -64,12 +64,12 @@ type WorkerPool[T, R any] struct {
 	// pending counts items that have been submitted or spawned but not yet
 	// finished executing. It's what tells the pool "there is no more work
 	// anywhere". The task that decrements it to zero calls cancel itself,
-	// so there's no separate done-channel or monitor goroutine watching it.
+	// so there's no separate done-channel or monitor goroutine watching it
 	pending atomic.Int64
 
 	// eg owns the fixed set of worker goroutines. The first error wins and cancels,
 	// and eg.Wait() tells us when every worker has actually returned
-	// which is the only safe moment to close results, since a worker can't be mid-send after that.
+	// which is the only safe moment to close results, since a worker can't be mid-send after that
 	eg *errgroup.Group
 
 	results chan R
@@ -86,7 +86,7 @@ type WorkerPool[T, R any] struct {
 // run as soon as they're constructed, watching ctx and their deques.
 func NewWorkerPool[T, R any](
 	ctx context.Context,
-	poolSize, initialWorkerCap int,
+	poolSize, initialWorkerCap, resultBuffSize int,
 	execute Task[T, R],
 ) *WorkerPool[T, R] {
 	// derive a cancellable context from the user's
@@ -102,7 +102,7 @@ func NewWorkerPool[T, R any](
 		execute: execute,
 		ctx:     ctx,
 		cancel:  cancel,
-		results: make(chan R), // TODO: pass in param to optionally make results buffered?
+		results: make(chan R, resultBuffSize),
 	}
 }
 
@@ -220,29 +220,67 @@ func (p *WorkerPool[T, R]) StealHalf(thiefIdx int) (ok bool) {
 	return false
 }
 
-// Runworksteal is a minimal usage example: a divide-and-conquer countdown.
-// Each item spawns item-1 as a child and reports item as a result, bottoming
-// out at 0. Real work would replace the body of execute.
+// chunkSize controls how far we split before testing individual numbers.
+// Splitting all the way down to size 1 would flood the deques with tiny
+// tasks; testing a batch per leaf amortizes the scheduling overhead.
+const chunkSize = 64
+
+// numRange is a half-open-ish inclusive range of ints to test for primality.
+type numRange struct{ lo, hi int } // inclusive on both ends
+
+func isPrime(n int) bool {
+	if n < 2 {
+		return false
+	}
+	for d := 2; d*d <= n; d++ {
+		if n%d == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// RunworkstealPrimes finds every prime in [2, limit] using the work-stealing
+// pool. Each leaf task independently discovers a different piece of
+// the answer (a batch of primes), and the only way to get the complete
+// set back is to read every value sent on the results channel.
 func Runworksteal() {
-	pool := NewWorkerPool[int, int](context.Background(), 10, 16,
-		func(ctx context.Context, item int, spawn func(int)) (result *int, err error) {
-			if item <= 0 {
-				return nil, nil
+	pool := NewWorkerPool[numRange, []int](context.Background(), 16, 8, 0,
+		func(ctx context.Context, r numRange, spawn func(numRange)) (*[]int, error) {
+			if r.hi-r.lo+1 > chunkSize {
+				mid := r.lo + (r.hi-r.lo)/2
+				spawn(numRange{r.lo, mid})
+				spawn(numRange{mid + 1, r.hi})
+				return nil, nil // this task itself found nothing directly
 			}
-			spawn(item - 1)
-			return &item, nil
+
+			var found []int
+			for n := r.lo; n <= r.hi; n++ {
+				if isPrime(n) {
+					found = append(found, n)
+				}
+			}
+			if found == nil {
+				return nil, nil // avoid sending an empty slice as a "result"
+			}
+			return &found, nil
 		})
 
-	pool.Submit(100)
-	results := pool.Run()
+	pool.Submit(numRange{2, 10000000})
+	resCh := pool.Run()
 
-	var total int
-	for r := range results {
-		total += r
-		fmt.Println(r)
-	}
-	if err := pool.Wait(); err != nil {
+	// Drain concurrently with Wait — results is unbuffered (resultBuffSize
+	// 0), so if we waited first, a worker blocked on `p.results <- *result`
+	// would deadlock against a Wait() that's blocked on that same worker exiting.
+	go func() {
+		for batch := range resCh {
+			fmt.Println(batch)
+		}
+	}()
+
+	err := pool.Wait()
+	if err != nil {
 		fmt.Println(err.Error())
 	}
-	fmt.Println("Total: ", total)
 }
+
