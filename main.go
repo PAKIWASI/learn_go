@@ -14,6 +14,5 @@ func main() {
 	// gameoflife.Run()
 	// concurrency.Run()
 	// httpserver.Run()
-	worksteal.Rundeque()
-
+	worksteal.Runworksteal()
 }
