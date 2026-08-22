@@ -89,6 +89,7 @@ func NewWorkerPool[T, R any](
 	poolSize, initialWorkerCap int,
 	execute Task[T, R],
 ) *WorkerPool[T, R] {
+	// derive a cancellable context from the user's
 	ctx, cancel := context.WithCancel(ctx)
 
 	workers := make([]Worker[T], poolSize)
@@ -101,7 +102,7 @@ func NewWorkerPool[T, R any](
 		execute: execute,
 		ctx:     ctx,
 		cancel:  cancel,
-		results: make(chan R),
+		results: make(chan R), // TODO: pass in param to optionally make results buffered?
 	}
 }
 
@@ -112,26 +113,27 @@ func (p *WorkerPool[T, R]) Submit(item T) {
 	p.workers[0].deque.PushBottom(item)
 }
 
-// Run starts all workers and returns the results channel immediately, so
-// the caller decides what to do with results. The channel closes once
-// every worker has exited, either because there's no work left anywhere
-// or because a task returned an error.
+// Run: Result channel generator. Starts all workers and returns the results
+// channel. The channel closes once every worker has exited,
+// either because there's no work left anywhere or because a task returned an error.
 //
 // Call Wait afterward (or concurrently, while draining results in another
 // goroutine) to get the terminal error, if any.
 func (p *WorkerPool[T, R]) Run() <-chan R {
-	p.eg, p.ctx = errgroup.WithContext(p.ctx) // TODO: no sync.Once?
+	p.eg, p.ctx = errgroup.WithContext(p.ctx)
 
+	// if any worker returns a non-nil error, errgroup cancels this new p.ctx
+	// automatically and remembers that error as the one Wait() will report.
 	for i := range p.workers {
+		// lauch all workers as errgroup goroutines
 		p.eg.Go(func() error {
 			return p.runWorker(i)
-		}) // if any error occurs in any worker, eg context is cancelled
+		})
 	}
 
-	// TODO: don't call wait here?
 	go func() {
-		p.eg.Wait() // discard here, Wait() below captures the real return
-		close(p.results)
+		p.eg.Wait()      // blocks until all worker goroutines return
+		close(p.results) // only then can we close the results channel
 	}()
 
 	return p.results
@@ -139,8 +141,8 @@ func (p *WorkerPool[T, R]) Run() <-chan R {
 
 // Wait blocks until every worker has exited and returns the first error
 // encountered (nil on normal completion). Safe to call while another
-// goroutine drains the results channel returned by Run. That's the
-// expected usage, since results only closes once workers have exited too.
+// goroutine drains the results channel returned by Run,
+// since results only closes once workers have exited too.
 func (p *WorkerPool[T, R]) Wait() error {
 	return p.eg.Wait() // errgroup.Wait is safe to call more than once
 }
@@ -170,6 +172,7 @@ func (p *WorkerPool[T, R]) runWorker(idx int) error {
 
 func (p *WorkerPool[T, R]) runTask(idx int, item T) error {
 	w := p.workers[idx]
+
 	spawn := func(child T) {
 		p.pending.Add(1) // before push: must be visible before any thief can see the child
 		w.deque.PushBottom(child)
@@ -239,9 +242,7 @@ func Runworksteal() {
 		fmt.Println(r)
 	}
 	if err := pool.Wait(); err != nil {
-		fmt.Errorf(err.Error())
+		fmt.Println(err.Error())
 	}
 	fmt.Println("Total: ", total)
 }
-
-
