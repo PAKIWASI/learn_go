@@ -56,7 +56,7 @@ type WorkerPool[T, R any] struct {
 	workers []Worker[T]
 	execute Task[T, R]
 
-	wakeup  chan struct{} // TODO: do i have to close this channel
+	wakeup  chan struct{}
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -100,6 +100,7 @@ func NewWorkerPool[T, R any](
 	return &WorkerPool[T, R]{
 		workers: workers,
 		execute: execute,
+		wakeup: make(chan struct{}, 1),
 		ctx:     ctx,
 		cancel:  cancel,
 		results: make(chan R, resultBuffSize),
@@ -111,7 +112,6 @@ func NewWorkerPool[T, R any](
 func (p *WorkerPool[T, R]) Submit(item T) {
 	p.pending.Add(1)
 	p.workers[0].deque.PushBottom(item)
-	p.broadcastWakeup()
 }
 
 // Run: Result channel generator. Starts all workers and returns the results
@@ -199,7 +199,13 @@ func (p *WorkerPool[T, R]) parkUntilWork(idx int) {
 }
 
 func (p *WorkerPool[T, R]) broadcastWakeup() {
-	p.wakeup <- struct{}{}
+	// capacity 1 is the minimum buffering that makes the send genuinely non-blocking in the common case
+	// (someone's about to check anyway, or already parked) while still being meaningful
+	// (there's an actual bit being set, not just a default-always no-op like capacity 0 would produce)
+	select {
+	case p.wakeup <- struct{}{}:
+	default:
+	}
 }
 
 
