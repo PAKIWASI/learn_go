@@ -12,14 +12,13 @@ package worksteal
 import (
 	"context"
 	"math/rand/v2"
+	"runtime"
 	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
 )
 
-// TODO: later
-//   - Add a per-worker next-job slot for newly spawned work.
-//   - Add per-worker scheduling state for tracking idle/running workers.
+const maxStealAttemps = 50
 
 // Worker owns a local work-stealing deque.
 //
@@ -56,6 +55,8 @@ type Task[T, R any] func(ctx context.Context, item T, spawn func(T)) (result *R,
 type WorkerPool[T, R any] struct {
 	workers []Worker[T]
 	execute Task[T, R]
+
+	wakeup  chan struct{} // TODO: do i have to close this channel
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -110,6 +111,7 @@ func NewWorkerPool[T, R any](
 func (p *WorkerPool[T, R]) Submit(item T) {
 	p.pending.Add(1)
 	p.workers[0].deque.PushBottom(item)
+	p.broadcastWakeup()
 }
 
 // Run: Result channel generator. Starts all workers and returns the results
@@ -146,8 +148,11 @@ func (p *WorkerPool[T, R]) Wait() error {
 	return p.eg.Wait() // errgroup.Wait is safe to call more than once
 }
 
+// runWorker implements the worker loop: get LIFO work from it's own deque.
+// if you run out, steal half from another worker, FIFO.
 func (p *WorkerPool[T, R]) runWorker(idx int) error {
 	w := p.workers[idx]
+	spins := 0
 	for {
 		select {
 		case <-p.ctx.Done():
@@ -156,25 +161,56 @@ func (p *WorkerPool[T, R]) runWorker(idx int) error {
 		}
 
 		item, ok := w.deque.PopBottom()
-		if !ok {
-			if p.StealHalf(idx) {
-				continue
+		if ok {
+			spins = 0
+			if err := p.runTask(idx, item); err != nil {
+				return err // some err occured while running the current task, abort
 			}
-			continue // TODO: spin; swap for a backoff/park strategy later
+			continue // task done, continue with the loop
 		}
 
-		if err := p.runTask(idx, item); err != nil {
-			return err
+		if p.StealHalf(idx) {
+			spins = 0
+			continue // steal succeeded, continue with the loop
 		}
+
+		// steal failed, spin block for some loops then park
+
+		spins++
+		if spins < maxStealAttemps {
+			runtime.Gosched()
+			continue // still within budget
+		}
+
+		// Exhausted the spin budget: actually block until woken.
+		p.parkUntilWork(idx)
+		spins = 0
 	}
 }
 
+// parkUntilWork blocks the worker with id `idx` and adds it to a waiting list.
+// whenever more work is added by any worker, all workers on the list are awaken
+func (p *WorkerPool[T, R]) parkUntilWork(idx int) {
+	select {
+	case <-p.ctx.Done():
+		return // shutdown call from elsewhere
+	case <-p.wakeup:
+	}
+}
+
+func (p *WorkerPool[T, R]) broadcastWakeup() {
+	p.wakeup <- struct{}{}
+}
+
+
+// runTask implements the actual task execution of a worker.
 func (p *WorkerPool[T, R]) runTask(idx int, item T) error {
 	w := p.workers[idx]
 
 	spawn := func(child T) {
 		p.pending.Add(1) // before push: must be visible before any thief can see the child
 		w.deque.PushBottom(child)
+		p.broadcastWakeup()
 	}
 
 	result, err := p.execute(p.ctx, item, spawn)
@@ -212,10 +248,10 @@ func (p *WorkerPool[T, R]) StealHalf(thiefIdx int) (ok bool) {
 			v, okk := p.workers[idx].deque.StealHalf()
 			if okk {
 				p.workers[thiefIdx].deque.PushSliceBottom(v)
+				p.broadcastWakeup()
 				return true
 			}
 		}
 	}
 	return false
 }
-
