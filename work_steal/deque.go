@@ -171,15 +171,10 @@ func (d *LFdeque[T]) PopBottom() (v T, ok bool) {
 // of goroutines may call this concurrently, including concurrently with
 // the owner's PushBottom/PopBottom).
 //
-// KNOWN LIMITATION (see README.md "Known limitation: benign data race
-// under -race"): the a.get(t) read below can race with a concurrent
-// PushBottom's a.put(b, v) write on the same circularArray slot, if this
-// goroutine stalls between loading t and reading the array while the
-// owner reclaims that slot for a new element. The subsequent
-// CompareAndSwap always fails in that case, so the racy read is discarded
-// and never returned - but it is still an unsynchronized access under
-// Go's memory model, so `go test -race` can flag it. This is expected;
-// see the README for why it's not fixed here.
+// KNOWN LIMITATION: the a.get(t) read below can race with a concurrent
+// PushBottom's array write under `go test -race`. This is expected and
+// does not affect correctness - see README.md, "Known limitation: benign
+// data race under -race", for the full explanation.
 func (d *LFdeque[T]) Steal() (v T, ok bool) {
 	t := d.top.Load()
 	b := d.bottom.Load()

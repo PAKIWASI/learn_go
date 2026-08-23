@@ -42,40 +42,71 @@ push/steal traffic through `WorkerPool` on a struct-typed `T`).
 
 ### Why it happens
 
-A thief calls `Steal()`, which reads the value at its snapshot of `top`
-*before* attempting `CompareAndSwap(top, top+1)` — this is intentional,
-matching the Chase-Lev paper: grab the value first, then verify you won the
-claim, and discard the value if you lost.
+`Steal()` reads the value at its snapshot of `top` *before* attempting
+`CompareAndSwap(top, top+1)` — intentional, matching the Chase-Lev paper:
+grab the value first, then verify you won the claim.
 
-If a thief stalls (goroutine preemption, cache miss, scheduling noise)
-between reading `top` and actually reading the array slot, the owner can
-keep running in the meantime: it pushes new items, `top` advances further
-(via another thief's successful steal), and the owner's `PushBottom` sees
-that `top` has moved past the stalled thief's slot and reuses that slot for
-a brand-new, unrelated element. When the stalled thief finally reads the
-array, it can land on a slot the owner is concurrently overwriting.
+Split by outcome:
 
-### Why it's safe anyway
+- **The thief's CAS succeeds** (it won the slot). Its read happened before
+  its own CAS store, in program order. The owner can only legally reuse
+  that slot after its own `top.Load()` observes a value ≥ `t+1` — and
+  because `sync/atomic` operations form a single total order, that load
+  *synchronizes-with* this thief's store. Chaining it: thief's read →
+  (program order) → thief's CAS store → (synchronizes-with) → owner's
+  later `top.Load()` → (program order) → owner's write. That's a full
+  happens-before edge. **A winning thief's read is already properly
+  ordered relative to any later reuse of that slot — this case is not
+  racy.**
 
-The owner only ever reclaims a slot after observing that `top` has already
-moved past it. That means the stalled thief's later
-`CompareAndSwap(top, top+1)` is guaranteed to fail (`top` is no longer what
-the thief read), so the racy read is always discarded via the `ok == false`
-path and never returned to a caller. This is exactly the "read before CAS"
-pattern the original paper relies on, proven safe under a memory model
-where the array itself uses atomic (or fenced) element access.
+- **The thief's CAS fails** (someone else already advanced `top` past
+  `t` first). The read still happened, but this thief never performs a
+  store of its own — there's nothing for the owner's later load to
+  synchronize *with* on this thief's side. Its read is completely
+  unordered relative to whatever the owner does afterward. **This is the
+  actual race**: a losing thief's array read, not the value it returns
+  (which is always correctly discarded via `ok == false`), but the bare
+  act of reading a slot the owner may already be free to reuse and is
+  concurrently overwriting.
+
+So the hazard is specifically: *a thief that is about to lose the race for
+`top` reads the array before finding that out.*
+
+### Why the result is still always correct
+
+Regardless of which case above applies, whenever the CAS fails the read
+value is discarded and never returned to a caller — that's the existing
+`ok == false` path. No caller ever observes data from a reused slot.
 
 ### What isn't fully guaranteed
 
-`circularArray.get` / `circularArray.put` use plain, non-atomic slice
-element access rather than atomic loads/stores. Under Go's memory model,
-an unsynchronized concurrent write and read of the same location is
-technically undefined — for a multi-word `T` (e.g. `primeRange{Lo, Hi int}`)
-a stalled thief could in principle observe a torn value (part old, part
-new) before the CAS discards it. In practice this doesn't threaten
-correctness here, because the value is always thrown away when this
-happens, but it's the reason `-race` flags it and the reason this isn't
-just silenced as a false positive.
+Discarding the *value* doesn't make the *read itself* well-defined. Per
+the above, a losing thief's `a.get(t)` is an unsynchronized concurrent
+access against the owner's `a.put(b, v)` on the same slot, using plain,
+non-atomic slice element access. Under Go's memory model that is
+technically a data race regardless of what happens to the result — and for
+a multi-word `T` (e.g. `primeRange{Lo, Hi int}`), a losing thief could in
+principle observe a torn value (part old, part new) during that read. That
+torn value is still thrown away, so no caller is affected, but it's why
+`-race` correctly flags this rather than it being a detector false
+positive.
+
+### Why re-ordering `Steal` (e.g. CAS-then-read, or CAS-read-CAS) doesn't fix it
+
+Any fix built only out of additional loads/CASes on `top` can only
+synchronize `top` itself, not the array memory being read. Moving the CAS
+before the read removes the losing thief's read entirely (good), but now
+exposes the *winning* thief instead: its read happens after its own
+successful CAS store rather than before, so nothing requires the owner's
+write to wait until that thief has actually finished reading — the owner
+is free to reuse the slot (after the array wraps around again) once it
+next observes `top` having advanced, without waiting on the winner's read
+to complete. A second CAS/load on `top` after the read doesn't add
+anything either, since nothing else can contend for `top` once a thief has
+already won that index — such a check would trivially always pass and
+says nothing about whether the array slot itself was touched. Making the
+array read provably safe requires synchronization tied to the array memory
+itself, not more operations on `top` — hence the two real fixes below.
 
 ### Fixing it properly (not done here, on purpose)
 

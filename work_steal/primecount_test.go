@@ -13,8 +13,8 @@ func TestCountPrimesSequential_KnownValues(t *testing.T) {
 	}{
 		{0, 0},
 		{2, 0},
-		{3, 1},  // {2}
-		{10, 4}, // {2,3,5,7}
+		{3, 1},   // {2}
+		{10, 4},  // {2,3,5,7}
 		{100, 25},
 		{1000, 168},
 	}
@@ -26,15 +26,10 @@ func TestCountPrimesSequential_KnownValues(t *testing.T) {
 	}
 }
 
-// NOTE(-race): this test drives real concurrent PushBottom/Steal traffic
-// through WorkerPool (spawn on the owner side, StealHalf on the thief
-// side) over a struct-typed T (primeRange). Under `go test -race`, this
-// is one of the two tests most likely to intermittently report a data
-// race between LFdeque.PushBottom's array write and LFdeque.Steal's array
-// read (deque.go). That race is a known, documented, benign limitation —
-// see the "Known limitation" section in README.md for why it doesn't
-// affect the result. If this test ever fails on a wrong *count* (not a
-// -race report), that's a real bug; a -race report alone is expected.
+// NOTE(-race): one of the two tests most likely to intermittently trigger
+// the known benign LFdeque race - see README.md, "Known limitation:
+// benign data race under -race". A -race report here alone is expected;
+// a wrong count is a real bug.
 func TestCountPrimesParallel_MatchesSequential(t *testing.T) {
 	const lo, hi = 0, 50_000
 	want := countPrimesSequential(lo, hi)
@@ -110,11 +105,9 @@ func TestCountPrimesParallel_ThresholdOfOne(t *testing.T) {
 // catch any flakiness from the underlying deque/pool under real scheduling
 // noise, rather than trusting a single lucky pass.
 //
-// NOTE(-race): repeating the run 50x makes this, along with
-// TestCountPrimesParallel_MatchesSequential, the most likely place to
-// reproduce the known benign PushBottom-write/Steal-read race documented
-// in README.md ("Known limitation: benign data race under -race"). A
-// -race report here without a value mismatch is expected, not a regression.
+// NOTE(-race): the other test most likely to reproduce the known benign
+// LFdeque race - see README.md, "Known limitation: benign data race under
+// -race".
 func TestCountPrimesParallel_Repeated(t *testing.T) {
 	const lo, hi = 0, 8_000
 	want := countPrimesSequential(lo, hi)
