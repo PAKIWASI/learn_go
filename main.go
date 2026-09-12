@@ -1,15 +1,9 @@
 package main
 
-// gameoflife "github.com/PAKIWASI/learn_go/game_of_life"
-// concurrency "github.com/PAKIWASI/learn_go/concurrency"
-// httpserver "github.com/PAKIWASI/learn_go/http_server"
-
-
-
+import (
+	"github.com/PAKIWASI/learn_go/lets_go"
+)
 
 func main() {
-
-	// gameoflife.Run()
-	// concurrency.Run()
-	// httpserver.Run()
+	httpserver.RunServer()
 }
