@@ -1,4 +1,5 @@
-
+DROP TABLE IF EXISTS snippets;
+DROP TABLE IF EXISTS users;
 
 CREATE TABLE snippets (
     id SERIAL PRIMARY KEY,
